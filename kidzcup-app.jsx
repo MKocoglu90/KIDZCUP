@@ -39,6 +39,12 @@ function formatDatum(iso) {
   }
 }
 
+// Datum + optionale Turnier-Uhrzeit zu einer Zeile kombinieren, z. B. "12. Oktober 2026, 09:00 Uhr"
+function formatTermin(turnier) {
+  const datumText = formatDatum(turnier.datum);
+  return turnier.uhrzeit ? `${datumText}, ${turnier.uhrzeit} Uhr` : datumText;
+}
+
 function formatDatumZeit(ts) {
   if (!ts) return "–";
   return new Intl.DateTimeFormat("de-DE", {
@@ -64,7 +70,16 @@ function effektiverStatus(reg, jetzt) {
   return reg.status;
 }
 
+// Einheitliche Beschriftung der Jahrgangs-Ausrichtung, an allen Anzeigestellen verwendet.
+function jahrgangTypLabel(typ) {
+  if (typ === "alt") return "Älterer Jahrgang";
+  if (typ === "jung") return "Jüngerer Jahrgang";
+  if (typ === "gemischt") return "Gemischt (älterer & jüngerer Jahrgang)";
+  return "";
+}
+
 const STATUS_LABEL = {
+  eingegangen: "Anmeldung eingegangen – wird geprüft",
   ausstehend: "Zahlung ausstehend",
   zahlung_gemeldet: "Zahlung gemeldet – wird geprüft",
   bestaetigt: "Teilnahme bestätigt",
@@ -74,6 +89,7 @@ const STATUS_LABEL = {
 };
 
 const STATUS_FARBE = {
+  eingegangen: "var(--kc-blue)",
   ausstehend: "var(--kc-gold)",
   zahlung_gemeldet: "var(--kc-blue)",
   bestaetigt: "var(--kc-green)",
@@ -94,19 +110,23 @@ function csvEscape(feld) {
 
 function anmeldungenAlsCsv(liste, turniere, jetzt) {
   const kopf = [
-    "Turnier", "Verein", "Trainer", "Jahrgang", "Jugend", "E-Mail", "Telefon", "Notfallkontakt",
-    "Status", "Angemeldet am", "Zahlungsfrist", "Zahlungsreferenz", "Foto-/Videoeinverständnis", "Bearbeitet von",
+    "Turnier", "Verein", "Trainer", "Jahrgang", "Jugend", "Jahrgangs-Ausrichtung", "Spielstärke", "E-Mail", "Telefon", "Notfallkontakt",
+    "Status", "Angemeldet am", "Zahlungsfrist", "Zahlungsreferenz", "Gebührenfrei", "Foto-/Videoeinverständnis", "Bearbeitet von",
   ];
   const zeilen = liste.map((a) => {
     const t = turniere.find((tt) => tt.id === a.turnierId);
     const st = effektiverStatus(a, jetzt);
     return [
       t ? t.name : "",
-      a.verein, a.trainer, a.jahrgang, a.jugend, a.email, a.telefon, a.notfallkontakt || "",
+      a.verein, a.trainer, a.jahrgang, a.jugend,
+      jahrgangTypLabel(a.jahrgangTyp),
+      a.spielstaerke ? `${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}` : "",
+      a.email, a.telefon, a.notfallkontakt || "",
       STATUS_LABEL[st] || st,
       formatDatumZeit(a.angemeldetAm),
       a.frist ? formatDatumZeit(a.frist) : "–",
       a.zahlungsreferenz || "",
+      a.gebuehrenfrei ? "Ja" : "Nein",
       a.fotoEinverstaendnis ? "Ja" : "Nein",
       a.bearbeitetVon || "",
     ].map(csvEscape).join(",");
@@ -126,6 +146,50 @@ function csvHerunterladen(dateiname, inhalt) {
   URL.revokeObjectURL(url);
 }
 
+// Telefonnummer im internationalen Format (+49...) für die vCard - Handys erkennen das zuverlässiger
+// als lokale Schreibweisen mit führender 0.
+function telefonInternational(telefon) {
+  let n = (telefon || "").replace(/[^\d+]/g, "");
+  if (n.startsWith("+")) return n;
+  if (n.startsWith("0")) return "+49" + n.slice(1);
+  return n ? "+" + n : "";
+}
+
+// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste. Gibt Blob + URL zurück,
+// damit die Admin-Ansicht sowohl das native Teilen-Menü (bevorzugt) als auch einen Link als Rückfalllösung
+// anbieten kann. Direktes Antippen einer .vcf-Datei in Safari zeigt auf dem iPhone unzuverlässig nur
+// einen einzelnen Kontakt - über "Teilen" → Mail/AirDrop funktioniert der Mehrfach-Import zuverlässig.
+function vcardFeldEscape(text) {
+  return String(text || "").replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function kontakteVcfVorbereiten(turnier, liste) {
+  const karten = liste
+    .filter((a) => a.telefon)
+    .map((a) => {
+      const name = vcardFeldEscape(`${a.verein} (${a.trainer})`);
+      const verein = vcardFeldEscape(a.verein);
+      const zeilen = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `N:${verein};;;;`,
+        `FN:${name}`,
+        `ORG:${verein}`,
+        `TEL;TYPE=CELL:${telefonInternational(a.telefon)}`,
+        a.email ? `EMAIL:${vcardFeldEscape(a.email)}` : null,
+        `NOTE:KIDZCUP - ${vcardFeldEscape(turnier.name)}`,
+        "END:VCARD",
+      ];
+      return zeilen.filter(Boolean).join("\r\n");
+    });
+
+  if (karten.length === 0) return null;
+
+  const dateiname = `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`;
+  const blob = new Blob([karten.join("\r\n") + "\r\n"], { type: "text/vcard;charset=utf-8;" });
+  return { blob, dateiname, url: URL.createObjectURL(blob), anzahl: karten.length };
+}
+
 // Kontaktdaten des Veranstalters – hier zentral eintragen, wird u. a. im Datenschutztext verwendet.
 const VERANSTALTER = {
   name: "KidzCup Dortmund",
@@ -136,6 +200,16 @@ const VERANSTALTER = {
   vertreter: "Recep Aksoy",
 };
 
+// Vorbelegung für neue Turniere - bleibt pro Turnier änderbar, falls sich mal was ändert.
+const STANDARD_IBAN = "DE33500240243247423401";
+const STANDARD_KONTOINHABER = "Recep Aksoy";
+
+// Fügt Leerzeichen alle 4 Zeichen ein, damit die IBAN wie gewohnt lesbar dargestellt wird.
+function formatIban(iban) {
+  if (!iban) return "";
+  return iban.replace(/\s+/g, "").replace(/(.{4})/g, "$1 ").trim();
+}
+
 // ---------- E-Mail-Benachrichtigungen ----------
 //
 // Ohne eigenen Server kann eine Web-App keine E-Mails im Hintergrund verschicken (ein API-Schlüssel
@@ -145,8 +219,8 @@ const VERANSTALTER = {
 
 // Wird gesetzt, sobald ein eigenes Backend (siehe kidzcup-email-backend/) deployt wurde.
 // Solange die URL leer ist, passiert hier nichts – die App funktioniert unverändert mit den mailto-Buttons.
-const E_MAIL_WEBHOOK_URL = "";
-const E_MAIL_WEBHOOK_SECRET = ""; // muss mit WEBHOOK_SECRET im Backend übereinstimmen, falls dort gesetzt
+const E_MAIL_WEBHOOK_URL = "https://kidzcup-email-backend.onrender.com/webhook";
+const E_MAIL_WEBHOOK_SECRET = "kidzcup-geheim-2026"; // muss mit WEBHOOK_SECRET im Backend übereinstimmen, falls dort gesetzt
 
 function mailtoLink(empfaenger, betreff, text) {
   return `mailto:${empfaenger}?subject=${encodeURIComponent(betreff)}&body=${encodeURIComponent(text)}`;
@@ -166,11 +240,32 @@ function whatsappLink(telefon, nachricht) {
   return `https://wa.me/${nummer}?text=${encodeURIComponent(nachricht)}`;
 }
 
+// Baut den Zahlungsabschnitt einer Mail: Link (falls vorhanden) + Bankverbindung (falls hinterlegt).
+// Wird bei jeder Mail verwendet, die zur Zahlung auffordert, damit beide Wege konsistent genannt werden.
+function bauZahlungshinweis(anmeldung, turnier) {
+  const zahlLinkZeile = turnier?.zahlLink ? `Zahlungslink:\n${turnier.zahlLink}\n\n` : "";
+  const bankZeile = turnier?.iban
+    ? `Alternativ per Überweisung:\nIBAN: ${formatIban(turnier.iban)}\n${turnier.kontoinhaber ? `Kontoinhaber: ${turnier.kontoinhaber}\n` : ""}Verwendungszweck: ${anmeldung.verein} – ${turnier?.name}\n\n`
+    : "";
+  return zahlLinkZeile || bankZeile ? `${zahlLinkZeile}${bankZeile}` : "(Zahlungsmöglichkeit beim Veranstalter erfragen)\n\n";
+}
+
 function mailVorlage(typ, anmeldung, turnier) {
   const frist = anmeldung.frist ? formatDatumZeit(anmeldung.frist) : "";
-  const termin = turnier ? `${formatDatum(turnier.datum)} in ${turnier.ort}` : "";
+  const termin = turnier ? `${formatTermin(turnier)} in ${turnier.ort}` : "";
   const gruss = `Sportliche Grüße\nDein KIDZCUP-Team`;
 
+  if (typ === "angenommen") {
+    return {
+      betreff: `Anmeldung angenommen – jetzt Startgebühr zahlen (${turnier?.name || "KIDZCUP"})`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `eure Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) wurde angenommen.\n\n` +
+        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
+        `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
+    };
+  }
   if (typ === "erinnerung") {
     return {
       betreff: `Erinnerung: Zahlung für ${turnier?.name || "euer Turnier"} noch offen`,
@@ -178,16 +273,31 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `eure Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) ist noch nicht bestätigt, ` +
         `da die Startgebühr von ${turnier?.preis} € bisher nicht bei uns eingegangen ist.\n\n` +
-        `Bitte zahlt bis spätestens ${frist} über folgenden Link:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Bitte zahlt bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
+        `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
+    };
+  }
+  if (typ === "frist_verlaengert") {
+    return {
+      betreff: `Neue Zahlungsfrist für ${turnier?.name || "euer Turnier"}`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `eure Zahlungsfrist für die Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) wurde ` +
+        `um weitere 3 Tage verlängert. Bitte zahlt jetzt bis spätestens ${frist} die Startgebühr von ${turnier?.preis} €.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
         `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
     };
   }
   if (typ === "bestaetigung") {
+    const einleitung = anmeldung.gebuehrenfrei
+      ? "eure Mannschaft ist von der Startgebühr befreit, ihr müsst nichts bezahlen"
+      : "eure Zahlung ist bei uns eingegangen";
     return {
       betreff: `Teilnahme bestätigt – ${turnier?.name || "KIDZCUP"}`,
       text:
         `Hallo ${anmeldung.trainer || ""},\n\n` +
-        `eure Zahlung ist bei uns eingegangen – die Teilnahme von ${anmeldung.verein} (Jahrgang ${anmeldung.jahrgang}, ${anmeldung.jugend}) ` +
+        `${einleitung} – die Teilnahme von ${anmeldung.verein} (Jahrgang ${anmeldung.jahrgang}, ${anmeldung.jugend}) ` +
         `am Turnier "${turnier?.name}" am ${termin} steht damit fest.\n\n` +
         `Wir freuen uns auf euch!\n\n${gruss}`,
     };
@@ -208,7 +318,8 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `gute Neuigkeiten: Für "${turnier?.name}" (${termin}) ist ein Platz frei geworden und eure Mannschaft ${anmeldung.verein} ` +
         `rückt von der Warteliste ins Turnier nach.\n\n` +
-        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist} über:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
         `Ohne fristgerechte Zahlung wird der Platz erneut freigegeben.\n\n${gruss}`,
     };
   }
@@ -225,9 +336,9 @@ function mailOeffnen(typ, anmeldung, turnier) {
 // Schlägt der Aufruf fehl (z. B. weil keine URL gesetzt ist oder kein Netzwerkzugriff besteht),
 // wird das bewusst nur geloggt – die App bleibt auch ohne Backend voll funktionsfähig.
 async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
-  if (!E_MAIL_WEBHOOK_URL) return;
+  if (!E_MAIL_WEBHOOK_URL) return false;
   try {
-    await fetch(E_MAIL_WEBHOOK_URL, {
+    const res = await fetch(E_MAIL_WEBHOOK_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -235,8 +346,20 @@ async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
       },
       body: JSON.stringify({ ereignis, anmeldung, turnier }),
     });
+    return res.ok;
   } catch (e) {
     console.warn("E-Mail-Backend nicht erreichbar, mailto-Fallback wird verwendet.", e);
+    return false;
+  }
+}
+
+// Zentrale Stelle: Ist der Server eingerichtet und erreichbar, verschickt er die Mail automatisch
+// im Hintergrund - der Admin muss nichts mehr tun. Nur falls der Server (noch) nicht läuft oder
+// gerade nicht erreichbar ist, springt wie bisher das Mail-Programm als Fallback ein.
+async function benachrichtigen(typ, anmeldung, turnier) {
+  const automatischVersendet = await benachrichtigeBackend(typ, anmeldung, turnier);
+  if (!automatischVersendet) {
+    mailOeffnen(typ, anmeldung, turnier);
   }
 }
 
@@ -256,7 +379,8 @@ function neuesSpiel(heimId, gastId, extra) {
 }
 
 // Gruppenphase: teilt Teams gleichmäßig in N Gruppen und erzeugt Jeder-gegen-Jeden-Spiele je Gruppe.
-function erstelleGruppenplan(teamIds, anzahlGruppen) {
+// Mit mitRueckrunde=true wird jede Paarung zusätzlich mit vertauschter Heim-/Gast-Rolle als Rückspiel angelegt.
+function erstelleGruppenplan(teamIds, anzahlGruppen, mitRueckrunde) {
   const teams = mischen(teamIds);
   const gruppen = Array.from({ length: anzahlGruppen }, (_, i) => ({
     id: neueId("gruppe"),
@@ -269,16 +393,22 @@ function erstelleGruppenplan(teamIds, anzahlGruppen) {
   gruppen.forEach((g) => {
     for (let i = 0; i < g.teamIds.length; i++) {
       for (let j = i + 1; j < g.teamIds.length; j++) {
-        spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id }));
+        spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id, rueckspiel: false }));
+        if (mitRueckrunde) {
+          spiele.push(neuesSpiel(g.teamIds[j], g.teamIds[i], { gruppeId: g.id, rueckspiel: true }));
+        }
       }
     }
   });
 
-  return { modus: "gruppen", gruppen, spiele, runden: null };
+  return { modus: "gruppen", gruppen, spiele, runden: null, mitRueckrunde: !!mitRueckrunde };
 }
 
 // K.o.-System: baut einen Baum mit Runden; nicht besetzte Plätze (bei ungerader Teamzahl) sind Freilose.
-function erstelleKoPlan(teamIds) {
+// Mit spielUmPlatz3=true wird zusätzlich ein Spiel um Platz 3 angelegt, das automatisch mit den
+// Verlierern der Halbfinal-Spiele befüllt wird, sobald diese feststehen.
+function erstelleKoPlan(teamIds, optionen) {
+  const spielUmPlatz3 = optionen?.spielUmPlatz3 || false;
   const teams = mischen(teamIds);
   const n = teams.length;
   let groesse = 1;
@@ -315,7 +445,77 @@ function erstelleKoPlan(teamIds) {
     }
   });
 
-  return { modus: "ko", gruppen: null, spiele: null, runden };
+  // Spiel um Platz 3 nur sinnvoll, wenn es tatsächlich ein Halbfinale gibt (mind. 4 Teams).
+  const platz3Spiel = spielUmPlatz3 && runden.length >= 2 ? neuesSpiel(null, null, {}) : null;
+
+  return { modus: "ko", gruppen: null, spiele: null, runden, platz3Spiel };
+}
+
+// Addiert Minuten zu einer "HH:MM"-Uhrzeit (mit Tagesüberlauf).
+function addMinuten(basiszeit, minuten) {
+  const [h, m] = (basiszeit || "09:00").split(":").map(Number);
+  const gesamt = (h * 60 + m + minuten + 1440 * 10) % 1440; // +10 Tage als Sicherheit gegen negative Werte
+  const hh = Math.floor(gesamt / 60);
+  const mm = gesamt % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+// Kernfunktion: verteilt Uhrzeit + Feld auf eine flache Liste von Spielen (mutiert sie direkt),
+// bevorzugt pro "Zeitrunde" Paarungen, bei denen beide Teams seit mind. einer Runde pausiert haben.
+function zeitenZuweisenAnListe(spiele, optionen) {
+  const { startzeit, spieldauerMin, anzahlFelder } = optionen;
+  const letzteRunde = {};
+  let rundenIndex = 0;
+  const unassigned = [...spiele];
+
+  while (unassigned.length > 0) {
+    const belegteTeams = new Set();
+    let feldZaehler = 0;
+    let inDieserRundeVergeben = false;
+
+    while (feldZaehler < anzahlFelder && unassigned.length > 0) {
+      let index = unassigned.findIndex((s) => {
+        if (belegteTeams.has(s.heimId) || belegteTeams.has(s.gastId)) return false;
+        const hLetzte = letzteRunde[s.heimId] ?? -2;
+        const gLetzte = letzteRunde[s.gastId] ?? -2;
+        return hLetzte < rundenIndex - 1 && gLetzte < rundenIndex - 1;
+      });
+      if (index === -1) {
+        index = unassigned.findIndex((s) => !belegteTeams.has(s.heimId) && !belegteTeams.has(s.gastId));
+      }
+      if (index === -1) break;
+
+      const spiel = unassigned.splice(index, 1)[0];
+      belegteTeams.add(spiel.heimId);
+      belegteTeams.add(spiel.gastId);
+      letzteRunde[spiel.heimId] = rundenIndex;
+      letzteRunde[spiel.gastId] = rundenIndex;
+      spiel.feld = feldZaehler + 1;
+      spiel.uhrzeit = addMinuten(startzeit, rundenIndex * spieldauerMin);
+      feldZaehler++;
+      inDieserRundeVergeben = true;
+    }
+
+    if (!inDieserRundeVergeben) break; // Sicherheitsbremse gegen Endlosschleife
+    rundenIndex++;
+  }
+}
+
+// Verteilt Uhrzeit + Feld auf alle Spiele eines Plans, bei denen die Teams schon feststehen
+// (bei Gruppenspielen alle, bei K.o. nur Runde 1 - spätere Runden stehen ja erst nach den
+// Ergebnissen fest und werden beim Start der Endrunde separat verplant).
+function planMitZeitenUndFeldern(plan, optionen) {
+  const neu = JSON.parse(JSON.stringify(plan));
+
+  const planbareSpiele = [];
+  if (neu.spiele) {
+    neu.spiele.forEach((s) => { if (s.heimId && s.gastId) planbareSpiele.push(s); });
+  } else if (neu.runden) {
+    (neu.runden[0] || []).forEach((s) => { if (s.heimId && s.gastId && !s.freilos) planbareSpiele.push(s); });
+  }
+
+  zeitenZuweisenAnListe(planbareSpiele, optionen);
+  return neu;
 }
 
 // Rechnet aus den Spielergebnissen die Tabelle einer Gruppe (Punkte, Tordifferenz, geschossene Tore).
@@ -349,44 +549,145 @@ function berechneTabelle(gruppe, spiele) {
 function spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden) {
   const neu = JSON.parse(JSON.stringify(plan));
 
-  if (neu.modus === "gruppen") {
+  // Gruppenspiel? (gilt für reine Gruppenphase und die Gruppenphase von "Gruppe + K.o.-Endrunde")
+  if (neu.spiele) {
     const s = neu.spiele.find((sp) => sp.id === spielId);
-    if (s) { s.heimTore = heimTore; s.gastTore = gastTore; }
+    if (s) { s.heimTore = heimTore; s.gastTore = gastTore; return neu; }
+  }
+
+  // Spiel um Platz 3? Hat keine Folgerunde, einfach nur Ergebnis + Sieger eintragen.
+  if (neu.platz3Spiel && neu.platz3Spiel.id === spielId) {
+    neu.platz3Spiel.heimTore = heimTore;
+    neu.platz3Spiel.gastTore = gastTore;
+    if (heimTore > gastTore) neu.platz3Spiel.sieger = neu.platz3Spiel.heimId;
+    else if (gastTore > heimTore) neu.platz3Spiel.sieger = neu.platz3Spiel.gastId;
+    else neu.platz3Spiel.sieger = siegerBeiUnentschieden || null;
     return neu;
   }
 
-  // K.o.: Runde und Index des Spiels finden
-  for (let r = 0; r < neu.runden.length; r++) {
-    const idx = neu.runden[r].findIndex((sp) => sp.id === spielId);
-    if (idx === -1) continue;
-    const spiel = neu.runden[r][idx];
-    spiel.heimTore = heimTore;
-    spiel.gastTore = gastTore;
-    if (heimTore > gastTore) spiel.sieger = spiel.heimId;
-    else if (gastTore > heimTore) spiel.sieger = spiel.gastId;
-    else spiel.sieger = siegerBeiUnentschieden || null;
+  // K.o.-Runde: Runde und Index des Spiels finden
+  if (neu.runden) {
+    for (let r = 0; r < neu.runden.length; r++) {
+      const idx = neu.runden[r].findIndex((sp) => sp.id === spielId);
+      if (idx === -1) continue;
+      const spiel = neu.runden[r][idx];
+      spiel.heimTore = heimTore;
+      spiel.gastTore = gastTore;
+      if (heimTore > gastTore) spiel.sieger = spiel.heimId;
+      else if (gastTore > heimTore) spiel.sieger = spiel.gastId;
+      else spiel.sieger = siegerBeiUnentschieden || null;
 
-    if (spiel.sieger && neu.runden[r + 1]) {
-      const naechsteIdx = Math.floor(idx / 2);
-      const feld = idx % 2 === 0 ? "heimId" : "gastId";
-      neu.runden[r + 1][naechsteIdx][feld] = spiel.sieger;
+      if (spiel.sieger && neu.runden[r + 1]) {
+        const naechsteIdx = Math.floor(idx / 2);
+        const feld = idx % 2 === 0 ? "heimId" : "gastId";
+        neu.runden[r + 1][naechsteIdx][feld] = spiel.sieger;
+      }
+      // Halbfinale mit "Spiel um Platz 3"? Verlierer automatisch dort eintragen.
+      if (neu.platz3Spiel && r === neu.runden.length - 2 && spiel.sieger) {
+        const verlierer = spiel.sieger === spiel.heimId ? spiel.gastId : spiel.heimId;
+        const zielFeld = idx % 2 === 0 ? "heimId" : "gastId";
+        neu.platz3Spiel[zielFeld] = verlierer;
+      }
+      break;
     }
-    break;
+  }
+  return neu;
+}
+
+// Manuelle Verschiebung von Uhrzeit/Feld eines einzelnen Spiels - z. B. wenn sich das Turnier
+// verzögert. Ändert nur dieses eine Spiel; über den bestehenden 20-Sekunden-Live-Abgleich sehen
+// alle anderen Geräte die neue Zeit automatisch, genau wie bei Ergebnissen.
+function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const alleSpiele = [
+    ...(neu.spiele || []),
+    ...(neu.runden ? neu.runden.flat() : []),
+    ...(neu.platz3Spiel ? [neu.platz3Spiel] : []),
+  ];
+  const s = alleSpiele.find((sp) => sp.id === spielId);
+  if (s) {
+    s.uhrzeit = uhrzeit || null;
+    s.feld = feld || null;
   }
   return neu;
 }
 
 // Erstellt clientseitig ein einfaches, druckbares PDF des aktuellen Spielplans (ohne Server).
-function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
+// Zeichnet eine Tabellenzeile mit echten Zellrahmen (Raster-Optik). spaltenBreiten und werte müssen
+// gleich lang sein. Mit kopf=true wird die Zeile fett und farbig hinterlegt (für Kopfzeilen).
+function pdfTabellenzeile(doc, x, y, spaltenBreiten, werte, kopf) {
+  const hoehe = 6.5;
+  let cx = x;
+  if (kopf) {
+    doc.setFillColor(27, 42, 71); // dunkelblau, passend zum KIDZCUP-Design
+    doc.rect(x, y, spaltenBreiten.reduce((a, b) => a + b, 0), hoehe, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont(undefined, "bold");
+  } else {
+    doc.setTextColor(30, 30, 30);
+    doc.setFont(undefined, "normal");
+  }
+  doc.setDrawColor(205, 210, 205);
+  spaltenBreiten.forEach((breite, i) => {
+    doc.rect(cx, y, breite, hoehe);
+    if (werte[i] !== undefined && werte[i] !== null) {
+      doc.text(String(werte[i]), cx + 2, y + hoehe - 2.2, { maxWidth: breite - 3.5 });
+    }
+    cx += breite;
+  });
+  doc.setTextColor(0, 0, 0);
+  doc.setFont(undefined, "normal");
+  return y + hoehe;
+}
+
+async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   const teamName = (id) => {
     if (!id) return "Freilos";
+    if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
+  const zeitFeldText = (s) => (s.uhrzeit ? `${s.uhrzeit}${s.feld ? ` · F${s.feld}` : ""}` : "");
+
+  // QR-Code zum Spielplan vorab laden (als Bild einbettbar) - schlägt das fehl (z. B. offline),
+  // wird das PDF trotzdem ganz normal ohne QR-Code erstellt.
+  const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
+  let qrDataUrl = null;
+  try {
+    const antwort = await fetch(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(spielplanLink)}`);
+    const blob = await antwort.blob();
+    qrDataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    qrDataUrl = null;
+  }
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
-  let y = 18;
+  const seitenBreite = doc.internal.pageSize.getWidth();
+  let y = 16;
+
+  const logoBreite = 46;
+  const logoHoehe = 9.5;
+  doc.addImage(LOGO_SRC, "JPEG", 14, y, logoBreite, logoHoehe);
+  let kopfUntenY = y + logoHoehe;
+
+  if (qrDataUrl) {
+    const qrGroesse = 22;
+    const qrY = y - 2;
+    doc.addImage(qrDataUrl, "PNG", seitenBreite - 14 - qrGroesse, qrY, qrGroesse, qrGroesse);
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text("Live-Spielplan", seitenBreite - 14 - qrGroesse / 2, qrY + qrGroesse + 3.5, { align: "center" });
+    doc.setTextColor(0, 0, 0);
+    kopfUntenY = Math.max(kopfUntenY, qrY + qrGroesse + 3.5);
+  }
+
+  y = kopfUntenY + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
     if (y + hoehe > seitenHoehe - 15) {
@@ -396,7 +697,9 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   };
 
   doc.setFontSize(16);
+  doc.setFont(undefined, "bold");
   doc.text(`Spielplan: ${turnier.name}`, 14, y);
+  doc.setFont(undefined, "normal");
   y += 7;
   doc.setFontSize(10);
   doc.setTextColor(90, 90, 90);
@@ -404,65 +707,90 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   doc.setTextColor(0, 0, 0);
   y += 10;
 
-  if (plan.modus === "gruppen") {
+  // Spaltenbreiten für die Gruppentabelle (Verein, Sp, S, U, N, Tore, Pkt.) - Summe 182mm
+  const tabSpalten = [66, 16, 16, 16, 16, 26, 26];
+  // Spaltenbreiten für die Spiel-Zeilen (Zeit/Feld, Heim, Ergebnis, Gast) - Summe 182mm
+  const spielSpalten = [24, 68, 22, 68];
+
+  if (plan.gruppen) {
     plan.gruppen.forEach((g) => {
-      neueZeilePruefen(10);
+      neueZeilePruefen(12);
       doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
       doc.text(g.name, 14, y);
-      y += 7;
+      doc.setFont(undefined, "normal");
+      y += 6;
 
       const tabelle = berechneTabelle(g, plan.spiele);
-      doc.setFontSize(9);
-      doc.text("Verein", 14, y);
-      doc.text("Sp", 90, y);
-      doc.text("S", 102, y);
-      doc.text("U", 112, y);
-      doc.text("N", 122, y);
-      doc.text("Tore", 132, y);
-      doc.text("Pkt", 155, y);
-      y += 5;
+      doc.setFontSize(8.5);
+      y = pdfTabellenzeile(doc, 14, y, tabSpalten, ["Verein", "Sp", "S", "U", "N", "Tore", "Pkt."], true);
       tabelle.forEach((r) => {
         neueZeilePruefen();
-        doc.text(String(teamName(r.teamId)).slice(0, 32), 14, y);
-        doc.text(String(r.spiele), 90, y);
-        doc.text(String(r.siege), 102, y);
-        doc.text(String(r.unentschieden), 112, y);
-        doc.text(String(r.niederlagen), 122, y);
-        doc.text(`${r.tore}:${r.gegentore}`, 132, y);
-        doc.text(String(r.punkte), 155, y);
-        y += 5.5;
+        y = pdfTabellenzeile(doc, 14, y, tabSpalten, [
+          String(teamName(r.teamId)).slice(0, 38), r.spiele, r.siege, r.unentschieden, r.niederlagen, `${r.tore}:${r.gegentore}`, r.punkte,
+        ]);
       });
-      y += 3;
+      y += 5;
 
-      const spieleDerGruppe = plan.spiele.filter((s) => s.gruppeId === g.id);
-      spieleDerGruppe.forEach((s) => {
-        neueZeilePruefen();
-        const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-        doc.text(`${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
-        y += 5.5;
-      });
-      y += 6;
+      const spieleDerGruppe = plan.spiele
+        .filter((s) => s.gruppeId === g.id)
+        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
+      if (spieleDerGruppe.length > 0) {
+        y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+        spieleDerGruppe.forEach((s) => {
+          neueZeilePruefen();
+          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+          const rueck = s.rueckspiel ? " (R)" : "";
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId) + rueck, ergebnis, teamName(s.gastId)]);
+        });
+      }
+      y += 8;
     });
-  } else {
+  }
+  if (plan.runden) {
+    if (plan.gruppen) {
+      neueZeilePruefen(12);
+      doc.setFontSize(15);
+      doc.setFont(undefined, "bold");
+      doc.text("K.o.-Endrunde", 14, y);
+      doc.setFont(undefined, "normal");
+      y += 9;
+    }
     plan.runden.forEach((runde, i) => {
-      neueZeilePruefen(10);
+      neueZeilePruefen(12);
       const titel = i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
       doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
       doc.text(titel, 14, y);
-      y += 7;
-      doc.setFontSize(9);
+      doc.setFont(undefined, "normal");
+      y += 6;
+      doc.setFontSize(8.5);
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
       runde.forEach((s) => {
         neueZeilePruefen();
         if (s.freilos) {
-          doc.text(`${teamName(s.heimId)}  –  Freilos`, 14, y);
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["", teamName(s.heimId), "Freilos", ""]);
         } else {
-          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-          doc.text(`${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
         }
-        y += 5.5;
       });
-      y += 6;
+      y += 8;
     });
+    if (plan.platz3Spiel) {
+      neueZeilePruefen(12);
+      doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
+      doc.text("Spiel um Platz 3", 14, y);
+      doc.setFont(undefined, "normal");
+      y += 6;
+      doc.setFontSize(8.5);
+      const s = plan.platz3Spiel;
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+      const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
+      y += 8;
+    }
   }
 
   doc.save(`spielplan-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
@@ -519,12 +847,15 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
 
   doc.setFontSize(12);
   doc.text("Startgebühr", 14, y);
-  doc.text(`${turnier.preis.toFixed(2)} €`, 160, y);
+  doc.text(anmeldung.gebuehrenfrei ? "befreit (0 €)" : `${turnier.preis.toFixed(2)} €`, 160, y);
   y += 10;
 
   doc.setFontSize(10);
   doc.setTextColor(30, 110, 60);
-  doc.text(`Status: Zahlung bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`, 14, y);
+  const statusText = anmeldung.gebuehrenfrei
+    ? `Status: Gebührenfrei bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`
+    : `Status: Zahlung bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`;
+  doc.text(statusText, 14, y);
   doc.setTextColor(0, 0, 0);
   y += 14;
 
@@ -533,6 +864,161 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
   doc.text("Dies ist eine Zahlungsbestätigung für eure Unterlagen, kein formales Rechnungsdokument.", 14, y);
 
   doc.save(`zahlungsbeleg-${anmeldung.verein.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
+}
+
+// Erstellt clientseitig eine PDF-Teilnehmerliste für die eigenen Unterlagen des Veranstalters
+// (z. B. nach dem Turnier lokal zu archivieren). Enthält bewusst mehr Details als die öffentliche
+// Mannschaftsliste, da dies eine reine Admin-Funktion ist (Kontaktdaten inklusive).
+function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
+  const liste = [...anmeldungen].sort((a, b) => {
+    if (a.jugend !== b.jugend) return (a.jugend || "").localeCompare(b.jugend || "");
+    return (a.verein || "").localeCompare(b.verein || "");
+  });
+
+  const doc = new jsPDF();
+  const seitenHoehe = doc.internal.pageSize.getHeight();
+  let y = 18;
+
+  const neueZeilePruefen = (hoehe = 7) => {
+    if (y + hoehe > seitenHoehe - 15) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  doc.setFontSize(16);
+  doc.text(`Teilnehmerliste: ${turnier.name}`, 14, y);
+  y += 7;
+  doc.setFontSize(10);
+  doc.setTextColor(90, 90, 90);
+  doc.text(`${formatTermin(turnier)} · ${turnier.ort}`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 6;
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · ${liste.length} Anmeldung(en)`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 10;
+
+  liste.forEach((a, i) => {
+    neueZeilePruefen(30);
+    const st = effektiverStatus(a, jetzt);
+
+    doc.setFontSize(11);
+    doc.setFont(undefined, "bold");
+    doc.text(`${i + 1}. ${a.verein}`, 14, y);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(9);
+    doc.text(STATUS_LABEL[st] || st, 160, y);
+    y += 5.5;
+
+    doc.setFontSize(9);
+    doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? " (" + jahrgangTypLabel(a.jahrgangTyp) + ")" : ""}`, 14, y);
+    y += 5;
+    if (a.spielstaerke) {
+      doc.text(`Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`, 14, y);
+      y += 5;
+    }
+    doc.text(`Trainer: ${a.trainer}`, 14, y);
+    y += 5;
+    doc.text(`Kontakt: ${a.email} · ${a.telefon}`, 14, y);
+    y += 5;
+    if (a.notfallkontakt) {
+      doc.text(`Notfallkontakt: ${a.notfallkontakt}`, 14, y);
+      y += 5;
+    }
+    if (a.gebuehrenfrei) {
+      doc.text("Gebührenfrei", 14, y);
+      y += 5;
+    }
+    y += 4;
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y - 2, 196, y - 2);
+  });
+
+  doc.save(`teilnehmerliste-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
+}
+
+// Berechnet pro Turnier: Anzahl bestätigter Teams, davon gebührenfrei, und die daraus
+// resultierenden tatsächlichen Einnahmen (nur bestätigte, nicht-gebührenfreie Teams zählen).
+function berechneEinnahmenProTurnier(turniere, anmeldungen) {
+  return turniere.map((t) => {
+    const bestaetigt = anmeldungen.filter((a) => a.turnierId === t.id && a.status === "bestaetigt");
+    const kostenfrei = bestaetigt.filter((a) => a.gebuehrenfrei);
+    const zahlend = bestaetigt.length - kostenfrei.length;
+    return {
+      turnier: t,
+      anzahlBestaetigt: bestaetigt.length,
+      anzahlKostenfrei: kostenfrei.length,
+      anzahlZahlend: zahlend,
+      einnahmen: zahlend * t.preis,
+    };
+  });
+}
+
+// Erstellt clientseitig ein PDF der Einnahmenübersicht für die eigenen Unterlagen des Veranstalters.
+function einnahmenAlsPdfHerunterladen(turniere, anmeldungen) {
+  const zeilen = berechneEinnahmenProTurnier(turniere, anmeldungen)
+    .filter((z) => z.anzahlBestaetigt > 0)
+    .sort((a, b) => new Date(a.turnier.datum) - new Date(b.turnier.datum));
+  const gesamtEinnahmen = zeilen.reduce((sum, z) => sum + z.einnahmen, 0);
+  const gesamtKostenfrei = zeilen.reduce((sum, z) => sum + z.anzahlKostenfrei, 0);
+
+  const doc = new jsPDF();
+  const seitenHoehe = doc.internal.pageSize.getHeight();
+  let y = 18;
+
+  const neueZeilePruefen = (hoehe = 7) => {
+    if (y + hoehe > seitenHoehe - 15) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  doc.setFontSize(16);
+  doc.text("Einnahmenübersicht", 14, y);
+  y += 7;
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · nur bestätigte Anmeldungen`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 10;
+
+  doc.setFontSize(9);
+  doc.setFont(undefined, "bold");
+  doc.text("Turnier", 14, y);
+  doc.text("Bestätigt", 110, y);
+  doc.text("Kostenfrei", 140, y);
+  doc.text("Einnahmen", 175, y);
+  doc.setFont(undefined, "normal");
+  y += 2;
+  doc.setDrawColor(180, 180, 180);
+  doc.line(14, y, 196, y);
+  y += 6;
+
+  zeilen.forEach((z) => {
+    neueZeilePruefen();
+    doc.setFontSize(9);
+    doc.text(`${z.turnier.name} (${formatDatum(z.turnier.datum)})`, 14, y, { maxWidth: 92 });
+    doc.text(String(z.anzahlBestaetigt), 114, y);
+    doc.text(String(z.anzahlKostenfrei), 146, y);
+    doc.text(`${z.einnahmen.toFixed(2)} €`, 175, y);
+    y += 7;
+  });
+
+  neueZeilePruefen(12);
+  y += 2;
+  doc.setDrawColor(30, 30, 30);
+  doc.line(14, y, 196, y);
+  y += 7;
+  doc.setFontSize(10);
+  doc.setFont(undefined, "bold");
+  doc.text("Gesamt", 14, y);
+  doc.text(String(gesamtKostenfrei) + " kostenfrei", 140, y);
+  doc.text(`${gesamtEinnahmen.toFixed(2)} €`, 175, y);
+  doc.setFont(undefined, "normal");
+
+  doc.save(`einnahmenuebersicht-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
 // ---------- Supabase-Anbindung ----------
@@ -734,10 +1220,21 @@ function turnierAusDb(t) {
     id: t.id, name: t.name, datum: t.datum, ort: t.ort,
     maxPlaetze: t.max_plaetze, preis: Number(t.preis), zahlLink: t.zahl_link,
     erstelltAm: t.erstellt_am ? new Date(t.erstellt_am).getTime() : Date.now(),
+    beschreibung: t.beschreibung || "",
+    uhrzeit: t.uhrzeit || "",
+    logoPfad: t.logo_pfad || null,
+    iban: t.iban || "",
+    kontoinhaber: t.kontoinhaber || "",
+    zielgruppen: t.zielgruppen || [],
   };
 }
 function turnierZuDb(t) {
-  return { id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null };
+  return {
+    id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null,
+    beschreibung: t.beschreibung || null, uhrzeit: t.uhrzeit || null, logo_pfad: t.logoPfad || null,
+    iban: t.iban || null, kontoinhaber: t.kontoinhaber || null,
+    zielgruppen: t.zielgruppen || [],
+  };
 }
 
 function anmeldungAusDb(a) {
@@ -750,6 +1247,9 @@ function anmeldungAusDb(a) {
     datenschutzAkzeptiertAm: a.datenschutz_akzeptiert_am, teilnahmebedingungenAkzeptiertAm: a.teilnahmebedingungen_akzeptiert_am,
     bearbeitetVon: a.bearbeitet_von,
     bestaetigtAm: a.bestaetigt_am ? new Date(a.bestaetigt_am).getTime() : null,
+    gebuehrenfrei: !!a.gebuehrenfrei,
+    spielstaerke: a.spielstaerke || "",
+    jahrgangTyp: a.jahrgang_typ || "",
   };
 }
 function anmeldungZuDb(a) {
@@ -758,14 +1258,30 @@ function anmeldungZuDb(a) {
     email: a.email, telefon: a.telefon, notfallkontakt: a.notfallkontakt || null,
     frist: a.frist ? new Date(a.frist).toISOString() : null,
     status: a.status, foto_einverstaendnis: !!a.fotoEinverstaendnis,
+    spielstaerke: a.spielstaerke || null, jahrgang_typ: a.jahrgangTyp || null,
   };
 }
 
 function spielplanAusDb(p) {
-  return { id: p.id, turnierId: p.turnier_id, modus: p.modus, gruppen: p.gruppen, spiele: p.spiele, runden: p.runden, erstelltAm: p.erstellt_am };
+  return {
+    id: p.id, turnierId: p.turnier_id, modus: p.modus, gruppen: p.gruppen, spiele: p.spiele, runden: p.runden,
+    erstelltAm: p.erstellt_am,
+    platz3Spiel: p.platz3spiel || null,
+    mitRueckrunde: !!p.mit_rueckrunde,
+    qualifiziertProGruppe: p.qualifiziert_pro_gruppe || null,
+    spielUmPlatz3Wunsch: !!p.spiel_um_platz3_wunsch,
+    teamNamen: p.team_namen || {},
+  };
 }
 function spielplanZuDb(p) {
-  return { id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null };
+  return {
+    id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null,
+    platz3spiel: p.platz3Spiel || null,
+    mit_rueckrunde: !!p.mitRueckrunde,
+    qualifiziert_pro_gruppe: p.qualifiziertProGruppe || null,
+    spiel_um_platz3_wunsch: !!p.spielUmPlatz3Wunsch,
+    team_namen: p.teamNamen || {},
+  };
 }
 
 function dokumentAusDb(d) {
@@ -784,7 +1300,7 @@ function dokumentZuDb(d) {
 export default function App() {
   const [ansicht, setAnsicht] = useState("teilnehmer");
   const [turniere, setTurniere] = useState([]);
-  const [anmeldungen, setAnmeldungen] = useState([]);
+  const [belegung, setBelegung] = useState({}); // { [turnierId]: anzahl } - KEINE Kontaktdaten, nur Zählwerte
   const [spielplaene, setSpielplaene] = useState([]);
   const [dokumente, setDokumente] = useState([]);
   const [geladen, setGeladen] = useState(false);
@@ -803,25 +1319,37 @@ export default function App() {
     }
   });
 
+  // Lädt nur die ZÄHLWERTE belegter Plätze, nicht die vollen Anmeldedaten - so bekommt
+  // die öffentliche Startseite nie Zugriff auf E-Mail/Telefon/Notfallkontakte anderer.
+  const belegungNeuLaden = useCallback(async () => {
+    try {
+      const zeilen = await supabaseRpc("oeffentliche_belegung_alle");
+      const map = {};
+      (zeilen || []).forEach((z) => { map[z.turnier_id] = z.belegt; });
+      setBelegung(map);
+    } catch (e) {
+      console.warn("Belegungszahlen konnten nicht geladen werden:", e.message);
+    }
+  }, []);
+
   const allesNeuLaden = useCallback(async () => {
     try {
-      const [t, a, s, d] = await Promise.all([
+      const [t, s, d] = await Promise.all([
         supabaseSelect("turniere", "?select=*&order=datum.asc"),
-        supabaseSelect("anmeldungen", "?select=*"),
         supabaseSelect("spielplaene", "?select=*"),
         supabaseSelect("dokumente", "?select=*&order=hochgeladen_am.desc"),
       ]);
       setTurniere(t.map(turnierAusDb));
-      setAnmeldungen(a.map(anmeldungAusDb));
       setSpielplaene(s.map(spielplanAusDb));
       setDokumente(d.map(dokumentAusDb));
+      await belegungNeuLaden();
       setLadeFehler("");
     } catch (e) {
       setLadeFehler("Daten konnten nicht geladen werden: " + e.message);
     } finally {
       setGeladen(true);
     }
-  }, []);
+  }, [belegungNeuLaden]);
 
   useEffect(() => { allesNeuLaden(); }, [allesNeuLaden]);
 
@@ -830,11 +1358,7 @@ export default function App() {
     return () => clearInterval(iv);
   }, []);
 
-  const belegtePlaetze = useCallback((turnierId) => {
-    return anmeldungen.filter(
-      (a) => a.turnierId === turnierId && ["ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
-    ).length;
-  }, [anmeldungen, jetzt]);
+  const belegtePlaetze = useCallback((turnierId) => belegung[turnierId] || 0, [belegung]);
 
   if (!geladen) {
     return (
@@ -853,6 +1377,9 @@ export default function App() {
           <button className={ansicht === "teilnehmer" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("teilnehmer")}>
             Anmeldung
           </button>
+          <button className={ansicht === "sponsor" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("sponsor")}>
+            Sponsoring
+          </button>
           <button className={ansicht === "admin" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("admin")}>
             Admin
           </button>
@@ -862,30 +1389,29 @@ export default function App() {
       {ladeFehler && <div className="kc-fehler" style={{ margin: "12px 18px" }}>{ladeFehler}</div>}
 
       <main className="kc-main">
-        {ansicht === "teilnehmer" ? (
+        {ansicht === "teilnehmer" && (
           <TeilnehmerAnsicht
             turniere={turniere}
-            anmeldungen={anmeldungen}
-            setAnmeldungen={setAnmeldungen}
             belegtePlaetze={belegtePlaetze}
+            belegungNeuLaden={belegungNeuLaden}
             spielplaene={spielplaene}
             dokumente={dokumente}
             deepLink={deepLink}
             jetzt={jetzt}
           />
-        ) : (
+        )}
+        {ansicht === "sponsor" && <SponsorAnsicht />}
+        {ansicht === "admin" && (
           <AdminAnsicht
             turniere={turniere}
             setTurniere={setTurniere}
-            anmeldungen={anmeldungen}
-            setAnmeldungen={setAnmeldungen}
             spielplaene={spielplaene}
             setSpielplaene={setSpielplaene}
             dokumente={dokumente}
             setDokumente={setDokumente}
-            belegtePlaetze={belegtePlaetze}
             jetzt={jetzt}
             neuLaden={allesNeuLaden}
+            belegungNeuLaden={belegungNeuLaden}
           />
         )}
       </main>
@@ -909,14 +1435,19 @@ export default function App() {
 
 // ---------- Teilnehmer-Ansicht ----------
 
-function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaetze, spielplaene, dokumente, deepLink, jetzt }) {
+function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielplaene, dokumente, deepLink, jetzt }) {
   const [ausgewaehlt, setAusgewaehlt] = useState(null);
   const [neueAnmeldung, setNeueAnmeldung] = useState(null); // frisch angelegte Anmeldung dieser Sitzung
+  const [mehrfachAnmeldungen, setMehrfachAnmeldungen] = useState(null); // bei Anmeldung mehrerer Mannschaften auf einmal
   const [codeSuche, setCodeSuche] = useState("");
   const [gefundeneAnmeldung, setGefundeneAnmeldung] = useState(null);
   const [suchFehler, setSuchFehler] = useState("");
   const [angezeigterSpielplan, setAngezeigterSpielplan] = useState(null); // Turnier, dessen Plan gerade angezeigt wird
+  const [livePlan, setLivePlan] = useState(null); // wird alle paar Sekunden neu geladen, solange der Spielplan offen ist
+  const [spielplanTeams, setSpielplanTeams] = useState([]); // nur {id, verein} der bestätigten Teams - keine Kontaktdaten
   const [angezeigteDokumenteFuer, setAngezeigteDokumenteFuer] = useState(null); // Turnier-Objekt oder "allgemein"
+  const [angezeigteMannschaftenFuer, setAngezeigteMannschaftenFuer] = useState(null); // Turnier, dessen angemeldete Teams angezeigt werden
+  const [mannschaftenListe, setMannschaftenListe] = useState([]); // nur {verein, jugend} - keine Kontaktdaten
   const [wirdGespeichert, setWirdGespeichert] = useState(false);
 
   // Deep-Link per QR-Code: direkt den Spielplan eines bestimmten Turniers öffnen
@@ -927,6 +1458,52 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turniere.length]);
 
+  // Sobald ein Spielplan angezeigt wird, nur die Vereinsnamen der bestätigten Teams laden
+  // (keine E-Mail/Telefon - die braucht die öffentliche Ansicht nicht).
+  useEffect(() => {
+    if (!angezeigterSpielplan) { setSpielplanTeams([]); return; }
+    (async () => {
+      try {
+        const teams = await supabaseRpc("oeffentliche_teams_fuer_turnier", { p_turnier_id: angezeigterSpielplan.id });
+        setSpielplanTeams(teams || []);
+      } catch {
+        setSpielplanTeams([]);
+      }
+    })();
+  }, [angezeigterSpielplan]);
+
+  // Solange jemand den Spielplan offen hat, alle 20 Sekunden im Hintergrund neu laden -
+  // so sieht man neue Ergebnisse, ohne die Seite selbst neu laden zu müssen.
+  useEffect(() => {
+    if (!angezeigterSpielplan) { setLivePlan(null); return; }
+    let abgebrochen = false;
+    const laden = async () => {
+      try {
+        const zeilen = await supabaseSelect("spielplaene", `?turnier_id=eq.${angezeigterSpielplan.id}&select=*`);
+        if (!abgebrochen && zeilen && zeilen[0]) setLivePlan(spielplanAusDb(zeilen[0]));
+      } catch {
+        // Fehler beim Nachladen einfach ignorieren - die zuletzt bekannte Version bleibt sichtbar.
+      }
+    };
+    laden();
+    const intervall = setInterval(laden, 20000);
+    return () => { abgebrochen = true; clearInterval(intervall); };
+  }, [angezeigterSpielplan]);
+
+  // Sobald die Liste angemeldeter Mannschaften angezeigt wird, nur Vereinsname + Jugend laden
+  // (keine E-Mail/Telefon - die braucht die öffentliche Ansicht nicht).
+  useEffect(() => {
+    if (!angezeigteMannschaftenFuer) { setMannschaftenListe([]); return; }
+    (async () => {
+      try {
+        const teams = await supabaseRpc("oeffentliche_angemeldete_teams", { p_turnier_id: angezeigteMannschaftenFuer.id });
+        setMannschaftenListe(teams || []);
+      } catch {
+        setMannschaftenListe([]);
+      }
+    })();
+  }, [angezeigteMannschaftenFuer]);
+
   const kommendeTurniere = useMemo(
     () => turniere
       .filter((t) => turnierFuerTeilnehmerSichtbar(t, jetzt))
@@ -934,28 +1511,65 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     [turniere, jetzt]
   );
 
+  const [monatFilter, setMonatFilter] = useState("");
+  const [jugendFilter, setJugendFilter] = useState("");
+
+  // Welche Monate überhaupt vorkommen, damit der Filter nur relevante Monate anbietet.
+  const verfuegbareMonate = useMemo(() => {
+    const monate = new Set(kommendeTurniere.map((t) => new Date(t.datum).getMonth()));
+    return Array.from(monate).sort((a, b) => a - b);
+  }, [kommendeTurniere]);
+
+  const turniereGefiltert = useMemo(() => {
+    return kommendeTurniere.filter((t) => {
+      if (monatFilter !== "" && new Date(t.datum).getMonth() !== Number(monatFilter)) return false;
+      // Turniere ohne hinterlegte Zielgruppe gelten als "für alle Jugenden" und werden nie ausgeblendet.
+      if (jugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(jugendFilter)) return false;
+      return true;
+    });
+  }, [kommendeTurniere, monatFilter, jugendFilter]);
+
+  const pruefeDuplikat = async (turnierId, verein, jugend) => {
+    try {
+      return await supabaseRpc("oeffentliche_duplikat_pruefung", { p_turnier_id: turnierId, p_verein: verein, p_jugend: jugend });
+    } catch {
+      return false; // im Zweifel nicht blockieren - der Server prüft beim Speichern ohnehin nicht doppelt
+    }
+  };
+
   const anmeldenBei = async (turnier, daten) => {
     setWirdGespeichert(true);
     try {
-      const jetztTs = Date.now();
-      const frei = turnier.maxPlaetze - belegtePlaetze(turnier.id);
-      const aufWarteliste = frei <= 0;
-      const neu = {
-        id: neueId("anm"),
-        turnierId: turnier.id,
-        ...daten,
-        angemeldetAm: jetztTs,
-        frist: aufWarteliste ? null : jetztTs + DREI_TAGE_MS,
-        status: aufWarteliste ? "warteliste" : "ausstehend",
-      };
-      const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
-      const anmeldung = anmeldungAusDb(gespeichert);
-      setAnmeldungen((prev) => [...prev, anmeldung]);
-      setNeueAnmeldung(anmeldung);
+      const { teams, ...gemeinsam } = daten;
+      let bereitsBelegt = belegtePlaetze(turnier.id);
+      const erstellteAnmeldungen = [];
+      for (const team of teams) {
+        const jetztTs = Date.now();
+        const aufWarteliste = bereitsBelegt >= turnier.maxPlaetze;
+        const neu = {
+          id: neueId("anm"),
+          turnierId: turnier.id,
+          ...gemeinsam,
+          ...team,
+          angemeldetAm: jetztTs,
+          frist: null, // startet erst, sobald der Admin die Anmeldung annimmt
+          status: aufWarteliste ? "warteliste" : "eingegangen",
+        };
+        const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
+        const anmeldung = anmeldungAusDb(gespeichert);
+        erstellteAnmeldungen.push(anmeldung);
+        if (!aufWarteliste) bereitsBelegt++;
+        benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
+      }
+      if (erstellteAnmeldungen.length === 1) {
+        setNeueAnmeldung(erstellteAnmeldungen[0]);
+      } else {
+        setMehrfachAnmeldungen(erstellteAnmeldungen);
+      }
       setAusgewaehlt(null);
-      benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
+      belegungNeuLaden();
     } catch (e) {
-      alert("Anmeldung konnte nicht gespeichert werden: " + e.message);
+      alert("Anmeldung konnte nicht vollständig gespeichert werden: " + e.message + " Bitte prüft über eure Anmeldecodes (falls schon welche vergeben wurden) oder meldet euch beim Veranstalter.");
     } finally {
       setWirdGespeichert(false);
     }
@@ -966,7 +1580,6 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       const ergebnis = await supabaseRpc("oeffentlich_als_bezahlt_melden", { p_code: anmeldungId, p_referenz: zahlungsreferenz || "" });
       if (!ergebnis) { alert("Diese Anmeldung konnte nicht aktualisiert werden (evtl. Status bereits geändert)."); return; }
       const aktualisierteAnmeldung = anmeldungAusDb(ergebnis);
-      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
       if (neueAnmeldung && neueAnmeldung.id === anmeldungId) setNeueAnmeldung(aktualisierteAnmeldung);
       if (gefundeneAnmeldung && gefundeneAnmeldung.id === anmeldungId) setGefundeneAnmeldung(aktualisierteAnmeldung);
     } catch (e) {
@@ -979,7 +1592,6 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     try {
       const ergebnis = await supabaseRpc("oeffentlich_foto_widerrufen", { p_code: anmeldungId });
       const aktualisierteAnmeldung = anmeldungAusDb(ergebnis);
-      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
       if (neueAnmeldung && neueAnmeldung.id === anmeldungId) setNeueAnmeldung(aktualisierteAnmeldung);
       if (gefundeneAnmeldung && gefundeneAnmeldung.id === anmeldungId) setGefundeneAnmeldung(aktualisierteAnmeldung);
     } catch (e) {
@@ -992,10 +1604,10 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
   const anmeldungLoeschen = async (anmeldungId) => {
     try {
       await supabaseRpc("oeffentlich_anmeldung_loeschen", { p_code: anmeldungId });
-      setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldungId));
       setNeueAnmeldung(null);
       setGefundeneAnmeldung(null);
       setCodeSuche("");
+      belegungNeuLaden();
     } catch (e) {
       alert("Fehler beim Löschen: " + e.message);
     }
@@ -1015,6 +1627,44 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       setSuchFehler("Fehler bei der Suche: " + e.message);
     }
   };
+
+  // Bestätigungsansicht nach Anmeldung mehrerer Mannschaften auf einmal
+  if (mehrfachAnmeldungen) {
+    const turnier = turniere.find((t) => t.id === mehrfachAnmeldungen[0]?.turnierId);
+    return (
+      <div className="kc-section">
+        <div className="kc-status-karte">
+          <h1 className="kc-h1">Anmeldung abgeschlossen</h1>
+          <p className="kc-sub">
+            Ihr habt {mehrfachAnmeldungen.length} Mannschaften für {turnier ? turnier.name : "das Turnier"} angemeldet.
+          </p>
+          <div className="kc-hinweis" style={{ margin: "14px 0" }}>
+            Jede Mannschaft hat einen <strong>eigenen Anmeldecode</strong> erhalten – bewahrt alle gut auf,
+            ihr braucht sie später einzeln, um den jeweiligen Status abzurufen (z. B. wann der Zahlungslink erscheint).
+          </div>
+          <div className="kc-anmeldungs-tabelle">
+            {mehrfachAnmeldungen.map((a) => {
+              const st = effektiverStatus(a, jetzt);
+              return (
+                <div className="kc-anmeldungs-zeile" key={a.id}>
+                  <div>
+                    <strong>{a.jugend}</strong> · Jahrgang {a.jahrgang}
+                    <div className="kc-notiz">Code: <code>{a.id}</code></div>
+                  </div>
+                  <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
+                    {STATUS_LABEL[st]}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <button className="kc-btn kc-btn--primary" style={{ marginTop: "16px" }} onClick={() => setMehrfachAnmeldungen(null)}>
+            Fertig
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Bestätigungsansicht nach frischer Anmeldung
   if (neueAnmeldung) {
@@ -1054,7 +1704,7 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       <AnmeldeFormular
         turnier={ausgewaehlt}
         belegtePlaetze={belegtePlaetze(ausgewaehlt.id)}
-        anmeldungen={anmeldungen}
+        pruefeDuplikat={pruefeDuplikat}
         jetzt={jetzt}
         onAbbrechen={() => setAusgewaehlt(null)}
         onAbsenden={(daten) => anmeldenBei(ausgewaehlt, daten)}
@@ -1063,13 +1713,16 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
   }
 
   if (angezeigterSpielplan) {
-    const plan = spielplaene.find((p) => p.turnierId === angezeigterSpielplan.id);
+    const plan = livePlan || spielplaene.find((p) => p.turnierId === angezeigterSpielplan.id);
     return (
       <div className="kc-section">
         <button className="kc-zurueck" onClick={() => setAngezeigterSpielplan(null)}>← Zurück zur Turnierliste</button>
         <h1 className="kc-h1">Spielplan: {angezeigterSpielplan.name}</h1>
         {plan ? (
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={angezeigterSpielplan} bearbeitbar={false} />
+          <>
+            <p className="kc-notiz">🔄 Aktualisiert sich automatisch alle 20 Sekunden.</p>
+            <SpielplanAnzeige plan={plan} teams={spielplanTeams} turnier={angezeigterSpielplan} bearbeitbar={false} />
+          </>
         ) : (
           <p className="kc-sub">Für dieses Turnier wurde noch kein Spielplan erstellt.</p>
         )}
@@ -1089,6 +1742,37 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     );
   }
 
+  if (angezeigteMannschaftenFuer) {
+    // Nach Jugend gruppieren, damit die Liste übersichtlich bleibt
+    const gruppen = {};
+    mannschaftenListe.forEach((m) => {
+      const schluessel = m.jugend || "Ohne Angabe";
+      if (!gruppen[schluessel]) gruppen[schluessel] = [];
+      gruppen[schluessel].push(m.verein);
+    });
+    const jugendSchluessel = Object.keys(gruppen).sort();
+    return (
+      <div className="kc-section">
+        <button className="kc-zurueck" onClick={() => setAngezeigteMannschaftenFuer(null)}>← Zurück</button>
+        <h1 className="kc-h1">Angemeldete Mannschaften: {angezeigteMannschaftenFuer.name}</h1>
+        {mannschaftenListe.length === 0 ? (
+          <p className="kc-sub">Noch keine Mannschaft angemeldet.</p>
+        ) : (
+          jugendSchluessel.map((jugend) => (
+            <div key={jugend} className="kc-mannschaften-gruppe">
+              <h3 className="kc-h3">{jugend}</h3>
+              <ul className="kc-mannschaften-liste">
+                {gruppen[jugend].map((verein, i) => (
+                  <li key={verein + i}>{verein}</li>
+                ))}
+              </ul>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <section className="kc-section">
@@ -1096,31 +1780,74 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
         <p className="kc-sub">Freie Plätze, Termin und Ort auf einen Blick – Anmeldegebühr wird per Link bezahlt.</p>
       </section>
 
+      {kommendeTurniere.length > 0 && (
+        <section className="kc-section kc-filter-leiste">
+          <label className="kc-feld">
+            <span>Monat</span>
+            <select className="kc-input" value={monatFilter} onChange={(e) => setMonatFilter(e.target.value)}>
+              <option value="">Alle Monate</option>
+              {verfuegbareMonate.map((m) => (
+                <option key={m} value={m}>{MONATSNAMEN[m]}</option>
+              ))}
+            </select>
+          </label>
+          <label className="kc-feld">
+            <span>Jugend</span>
+            <select className="kc-input" value={jugendFilter} onChange={(e) => setJugendFilter(e.target.value)}>
+              <option value="">Alle Jugenden</option>
+              {JUGEND_GRUPPEN.map((g) => (
+                <option key={g.wert} value={g.wert}>{g.label}</option>
+              ))}
+            </select>
+          </label>
+          {(monatFilter !== "" || jugendFilter !== "") && (
+            <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setMonatFilter(""); setJugendFilter(""); }}>
+              Filter zurücksetzen
+            </button>
+          )}
+        </section>
+      )}
+
       {kommendeTurniere.length === 0 && (
         <div className="kc-empty">Aktuell sind keine Turniere ausgeschrieben. Schau bald wieder vorbei.</div>
       )}
 
+      {kommendeTurniere.length > 0 && turniereGefiltert.length === 0 && (
+        <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>
+      )}
+
       <div className="kc-liste">
-        {kommendeTurniere.map((t) => {
+        {turniereGefiltert.map((t) => {
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           return (
             <div className="kc-karte" key={t.id} style={{ borderLeftColor: frei === 0 ? "var(--kc-gold)" : "var(--kc-green)" }}>
               <div className="kc-karte__kopf">
-                <h2 className="kc-karte__titel">{t.name}</h2>
+                {t.logoPfad && (
+                  <img className="kc-turnier-logo" src={dateiOeffentlicheUrl(t.logoPfad)} alt={`Logo ${t.name}`} />
+                )}
+                <div className="kc-karte__kopf-text">
+                  <h2 className="kc-karte__titel">{t.name}</h2>
+                </div>
                 <div className="kc-karte__zahl">
                   <span className="kc-zahl-gross">{frei}</span>
                   <span className="kc-zahl-label">Plätze frei</span>
                 </div>
               </div>
               <dl className="kc-details">
-                <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
+                <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
                 <div><dt>Ort</dt><dd>{t.ort}</dd></div>
                 <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
               </dl>
+              {t.beschreibung && <p className="kc-turnier-beschreibung">{t.beschreibung}</p>}
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
                 {frei === 0 ? "Auf Warteliste anmelden" : "Jetzt anmelden"}
               </button>
+              {belegt > 0 && (
+                <button className="kc-btn kc-btn--sekundaer kc-btn--block" onClick={() => setAngezeigteMannschaftenFuer(t)}>
+                  Angemeldete Mannschaften ({belegt})
+                </button>
+              )}
               {spielplaene.some((p) => p.turnierId === t.id) && (
                 <button className="kc-btn kc-btn--sekundaer kc-btn--block" onClick={() => setAngezeigterSpielplan(t)}>
                   Spielplan ansehen
@@ -1165,13 +1892,6 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
 function DatenschutzText() {
   return (
     <div className="kc-datenschutz-text">
-      <p className="kc-ds-hinweis-box">
-        <strong>Hinweis für den Veranstalter:</strong> Dieser Text ist ein sorgfältig formulierter Entwurf auf Basis
-        der DSGVO-Informationspflichten (Art. 13 DSGVO), aber keine Rechtsberatung. Bitte die Platzhalter in
-        eckigen Klammern ausfüllen und den Text vor dem Livegang von einem Anwalt oder Datenschutzbeauftragten
-        prüfen lassen.
-      </p>
-
       <strong>1. Verantwortlicher</strong>
       <p>
         {VERANSTALTER.name}<br />
@@ -1181,7 +1901,12 @@ function DatenschutzText() {
       </p>
 
       <strong>2. Welche Daten wir verarbeiten</strong>
-      <p>Im Rahmen der Turnieranmeldung erheben wir: Vereinsname, Name der Trainerin/des Trainers, Jahrgang der Mannschaft, E-Mail-Adresse und Telefonnummer der Kontaktperson.</p>
+      <p>
+        Im Rahmen der Turnieranmeldung erheben wir: Vereinsname, Name der Trainerin/des Trainers,
+        Jahrgang und Jugendkategorie der Mannschaft, Jahrgangs-Ausrichtung (älterer/jüngerer Jahrgang
+        der Altersklasse), selbst eingeschätzte Spielstärke, E-Mail-Adresse und Telefonnummer der
+        Kontaktperson sowie optional einen Notfallkontakt für den Turniertag.
+      </p>
 
       <strong>3. Zweck und Rechtsgrundlage</strong>
       <p>
@@ -1228,13 +1953,6 @@ function DatenschutzText() {
 function TeilnahmebedingungenText() {
   return (
     <div className="kc-datenschutz-text">
-      <p className="kc-ds-hinweis-box">
-        <strong>Hinweis für den Veranstalter:</strong> Auch dies ist ein sorgfältig formulierter Entwurf,
-        keine Rechtsberatung. Insbesondere Haftungsausschlüsse sind rechtlich nur eingeschränkt wirksam
-        (z. B. nie bei Vorsatz oder grober Fahrlässigkeit, bei Personenschäden ohnehin nur sehr begrenzt) –
-        bitte vor dem Livegang von einem Anwalt prüfen und die Platzhalter ausfüllen lassen.
-      </p>
-
       <strong>1. Teilnahmeberechtigung</strong>
       <p>Mit der Anmeldung bestätigt die meldende Person, zur Anmeldung der genannten Mannschaft für den angegebenen Verein berechtigt zu sein.</p>
 
@@ -1249,11 +1967,14 @@ function TeilnahmebedingungenText() {
         oder Gesundheit). Für Wertsachen und persönliche Gegenstände wird keine Haftung übernommen.
       </p>
 
-      <strong>4. Absage oder Abbruch des Turniers</strong>
+      <strong>4. Absage des Turniers oder der Teilnahme</strong>
       <p>
-        Muss das Turnier aus wichtigem Grund (z. B. Unwetter, behördliche Anordnung) abgesagt oder
-        abgebrochen werden, wird [Rückerstattungsregelung einsetzen, z. B.: die Startgebühr anteilig
-        zurückerstattet / ein Gutschein für ein Ersatztermin ausgestellt].
+        Muss das Turnier aus wichtigem Grund (z. B. Unwetter, behördliche Anordnung) vom Veranstalter
+        abgesagt werden, wird die bereits gezahlte Startgebühr vollständig zurückerstattet.
+      </p>
+      <p>
+        Sagt hingegen eine Mannschaft ihre Teilnahme ab, wird die bereits gezahlte Startgebühr
+        unabhängig vom Zeitpunkt der Absage <strong>nicht</strong> zurückerstattet.
       </p>
 
       <strong>5. Bild- und Tonaufnahmen</strong>
@@ -1268,68 +1989,119 @@ function TeilnahmebedingungenText() {
 // Übliche Jugend-/Altersklassen im deutschen Amateurfußball, inkl. gängiger 1er-/2er-Unterteilung.
 const JUGEND_KATEGORIEN = [
   "Bambini",
-  "G1", "G2", "G3", "G4", "G5",
+  "G1", "G2", "G3", "G4", "G5", "G6",
   "F1", "F2", "F3", "F4", "F5",
-  "E1", "E2", "E3", "E4", "E5",
+  "E1", "E2", "E3", "E4", "E5", "E6",
   "D1", "D2", "D3", "D4", "D5",
   "C1", "C2", "C3", "C4", "C5",
   "B1", "B2", "B3", "B4", "B5",
   "A1", "A2", "A3", "A4", "A5",
+  "F-Juniorinnen", "E-Juniorinnen", "D-Juniorinnen", "C-Juniorinnen", "B-Juniorinnen",
 ];
 
-function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrechen, onAbsenden }) {
-  const [form, setForm] = useState({
-    verein: "", trainer: "", jahrgang: "", jugend: "", email: "", telefon: "", notfallkontakt: "",
-  });
+// Grobe Gruppen für die Zielgruppen-Auswahl pro Turnier und den Jugend-Filter in der Turnierliste
+// (fasst z. B. G1-G5 zu "G-Jugend" zusammen, entspricht grob U7/U8 usw.).
+const JUGEND_GRUPPEN = [
+  { wert: "Bambini", label: "Bambini" },
+  { wert: "G", label: "G-Jugend" },
+  { wert: "F", label: "F-Jugend" },
+  { wert: "E", label: "E-Jugend" },
+  { wert: "D", label: "D-Jugend" },
+  { wert: "C", label: "C-Jugend" },
+  { wert: "B", label: "B-Jugend" },
+  { wert: "A", label: "A-Jugend" },
+  { wert: "F-Juniorinnen", label: "F-Juniorinnen" },
+  { wert: "E-Juniorinnen", label: "E-Juniorinnen" },
+  { wert: "D-Juniorinnen", label: "D-Juniorinnen" },
+  { wert: "C-Juniorinnen", label: "C-Juniorinnen" },
+  { wert: "B-Juniorinnen", label: "B-Juniorinnen" },
+];
+
+const MONATSNAMEN = [
+  "Januar", "Februar", "März", "April", "Mai", "Juni",
+  "Juli", "August", "September", "Oktober", "November", "Dezember",
+];
+
+function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbbrechen, onAbsenden }) {
+  const [form, setForm] = useState({ verein: "", trainer: "", email: "", telefon: "", notfallkontakt: "" });
+  const [anzahlMannschaften, setAnzahlMannschaften] = useState(1);
+  const [teams, setTeams] = useState([{ jahrgang: "", jugend: "", jahrgangTyp: "", spielstaerke: "" }]);
   const [datenschutzOk, setDatenschutzOk] = useState(false);
   const [zeigeDatenschutz, setZeigeDatenschutz] = useState(false);
   const [teilnahmebedingungenOk, setTeilnahmebedingungenOk] = useState(false);
   const [zeigeTeilnahmebedingungen, setZeigeTeilnahmebedingungen] = useState(false);
   const [fotoEinverstaendnis, setFotoEinverstaendnis] = useState(false);
   const [fehler, setFehler] = useState("");
+  const [wirdGeprueft, setWirdGeprueft] = useState(false);
   const frei = Math.max(0, turnier.maxPlaetze - belegtePlaetze);
 
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
 
-  const gueltig =
-    form.verein.trim() && form.trainer.trim() && form.jahrgang.trim() && form.jugend.trim() &&
-    form.email.trim() && form.telefon.trim() && datenschutzOk && teilnahmebedingungenOk;
+  const anzahlAendern = (e) => {
+    const n = Number(e.target.value);
+    setAnzahlMannschaften(n);
+    setTeams((prev) => {
+      const kopie = [...prev];
+      while (kopie.length < n) kopie.push({ jahrgang: "", jugend: "", jahrgangTyp: "", spielstaerke: "" });
+      while (kopie.length > n) kopie.pop();
+      return kopie;
+    });
+  };
 
-  const absenden = (e) => {
+  const teamFeld = (index, name) => (e) =>
+    setTeams((prev) => prev.map((t, i) => (i === index ? { ...t, [name]: e.target.value } : t)));
+
+  const teamsVollstaendig = teams.every((t) => t.jahrgang.trim() && t.jugend && t.jahrgangTyp && t.spielstaerke);
+  const jugendMehrfach = new Set(teams.map((t) => t.jugend)).size !== teams.length;
+
+  const gueltig =
+    form.verein.trim() && form.trainer.trim() && form.email.trim() && form.telefon.trim() &&
+    teamsVollstaendig && datenschutzOk && teilnahmebedingungenOk;
+
+  const absenden = async (e) => {
     e.preventDefault();
-    if (!gueltig) return;
-    const vereinNormiert = form.verein.trim().toLowerCase();
-    const jugendNormiert = form.jugend.trim().toLowerCase();
-    const duplikat = anmeldungen.find(
-      (a) => a.turnierId === turnier.id &&
-        a.verein.trim().toLowerCase() === vereinNormiert &&
-        (a.jugend || "").trim().toLowerCase() === jugendNormiert &&
-        !["abgelehnt", "abgelaufen"].includes(effektiverStatus(a, jetzt))
-    );
-    if (duplikat) {
-      setFehler(`"${form.verein}" (${form.jugend}) ist für dieses Turnier bereits angemeldet (Status: ${STATUS_LABEL[effektiverStatus(duplikat, jetzt)]}). Anmeldecode: ${duplikat.id}`);
+    if (!gueltig || wirdGeprueft) return;
+    if (jugendMehrfach) {
+      setFehler("Jede Mannschaft braucht eine eigene Jugend-Kategorie – bitte bei jeder Mannschaft eine unterschiedliche Jugend auswählen.");
       return;
     }
-    setFehler("");
-    onAbsenden({
-      ...form,
-      fotoEinverstaendnis,
-      datenschutzAkzeptiertAm: Date.now(),
-      teilnahmebedingungenAkzeptiertAm: Date.now(),
-    });
+    setWirdGeprueft(true);
+    try {
+      for (const team of teams) {
+        const bereitsAngemeldet = await pruefeDuplikat(turnier.id, form.verein.trim(), team.jugend);
+        if (bereitsAngemeldet) {
+          setFehler(`"${form.verein}" (${team.jugend}) ist für dieses Turnier bereits angemeldet. Falls das ein Irrtum ist, wendet euch bitte an den Veranstalter.`);
+          return;
+        }
+      }
+      setFehler("");
+      onAbsenden({
+        ...form,
+        fotoEinverstaendnis,
+        datenschutzAkzeptiertAm: Date.now(),
+        teilnahmebedingungenAkzeptiertAm: Date.now(),
+        teams,
+      });
+    } finally {
+      setWirdGeprueft(false);
+    }
   };
 
   return (
     <div className="kc-section">
       <button className="kc-zurueck" onClick={onAbbrechen}>← Zurück zur Turnierliste</button>
+      {turnier.logoPfad && (
+        <img className="kc-turnier-logo kc-turnier-logo--gross" src={dateiOeffentlicheUrl(turnier.logoPfad)} alt={`Logo ${turnier.name}`} />
+      )}
       <h1 className="kc-h1">Anmeldung: {turnier.name}</h1>
       <p className="kc-sub">
-        {formatDatum(turnier.datum)} · {turnier.ort} · {turnier.preis} € Startgebühr · noch {frei} Plätze frei
+        {formatTermin(turnier)} · {turnier.ort} · {turnier.preis} € Startgebühr pro Mannschaft · noch {frei} Plätze frei
       </p>
+      {turnier.beschreibung && <p className="kc-turnier-beschreibung">{turnier.beschreibung}</p>}
 
       {frei === 0 && (
         <div className="kc-hinweis kc-hinweis--warteliste">
-          Dieses Turnier ist aktuell ausgebucht. Deine Anmeldung landet auf der Warteliste – sobald ein Platz frei wird, wirst du aufgenommen und erhältst ab dann 3 Tage Zeit zur Zahlung.
+          Dieses Turnier ist aktuell ausgebucht. Eure Anmeldung(en) landen auf der Warteliste – sobald Plätze frei werden, rückt ihr nach und erhaltet ab dann 3 Tage Zeit zur Zahlung.
         </div>
       )}
 
@@ -1339,24 +2111,59 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
           <input className="kc-input" value={form.verein} onChange={feld("verein")} required />
         </label>
         <label className="kc-feld">
-          <span>Trainer</span>
+          <span>Trainer / Ansprechpartner</span>
           <input className="kc-input" value={form.trainer} onChange={feld("trainer")} required />
         </label>
-        <div className="kc-feld-reihe">
-          <label className="kc-feld">
-            <span>Jahrgang</span>
-            <input className="kc-input" type="number" min="2005" max="2026" placeholder="z. B. 2016" value={form.jahrgang} onChange={feld("jahrgang")} required />
-          </label>
-          <label className="kc-feld">
-            <span>Jugend</span>
-            <select className="kc-input" value={form.jugend} onChange={feld("jugend")} required>
-              <option value="" disabled>Bitte wählen…</option>
-              {JUGEND_KATEGORIEN.map((k) => (
-                <option key={k} value={k}>{k}</option>
-              ))}
-            </select>
-          </label>
-        </div>
+        <label className="kc-feld">
+          <span>Wie viele Mannschaften meldet ihr für dieses Turnier an?</span>
+          <select className="kc-input" value={anzahlMannschaften} onChange={anzahlAendern}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>{n} Mannschaft{n !== 1 ? "en" : ""}</option>
+            ))}
+          </select>
+        </label>
+
+        {teams.map((team, i) => (
+          <div className="kc-team-block" key={i}>
+            {teams.length > 1 && <h3 className="kc-h3">Mannschaft {i + 1}</h3>}
+            <div className="kc-feld-reihe">
+              <label className="kc-feld">
+                <span>Jahrgang</span>
+                <input className="kc-input" type="number" min="2005" max="2026" placeholder="z. B. 2016" value={team.jahrgang} onChange={teamFeld(i, "jahrgang")} required />
+              </label>
+              <label className="kc-feld">
+                <span>Jugend</span>
+                <select className="kc-input" value={team.jugend} onChange={teamFeld(i, "jugend")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  {JUGEND_KATEGORIEN.map((k) => (
+                    <option key={k} value={k}>{k}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="kc-feld-reihe">
+              <label className="kc-feld">
+                <span>Jahrgangs-Ausrichtung</span>
+                <select className="kc-input" value={team.jahrgangTyp} onChange={teamFeld(i, "jahrgangTyp")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  <option value="alt">Älterer Jahrgang der Altersklasse</option>
+                  <option value="jung">Jüngerer Jahrgang der Altersklasse</option>
+                  <option value="gemischt">Gemischt (älterer &amp; jüngerer Jahrgang)</option>
+                </select>
+              </label>
+              <label className="kc-feld">
+                <span>Spielstärke der Mannschaft</span>
+                <select className="kc-input" value={team.spielstaerke} onChange={teamFeld(i, "spielstaerke")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  <option value="stark">Stark</option>
+                  <option value="mittel">Mittel</option>
+                  <option value="schwach">Schwach</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        ))}
+
         <label className="kc-feld">
           <span>E-Mail</span>
           <input className="kc-input" type="email" value={form.email} onChange={feld("email")} required />
@@ -1377,8 +2184,8 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
 
         {frei > 0 && (
           <div className="kc-hinweis">
-            Nach der Anmeldung hast du <strong>3 Tage</strong> Zeit, die Startgebühr über den bereitgestellten Zahlungslink zu begleichen.
-            Ohne fristgerechte Zahlung wird die Teilnahme nicht bestätigt und der Platz wird freigegeben.
+            Nach der Annahme durch den Veranstalter habt ihr pro Mannschaft <strong>3 Tage</strong> Zeit, die Startgebühr über den bereitgestellten Zahlungslink zu begleichen.
+            Reichen die freien Plätze nicht für alle angemeldeten Mannschaften, landen die überzähligen automatisch auf der Warteliste.
           </div>
         )}
 
@@ -1395,7 +2202,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
         <div className="kc-datenschutz">
           <label className="kc-checkbox-zeile">
             <input type="checkbox" checked={teilnahmebedingungenOk} onChange={(e) => setTeilnahmebedingungenOk(e.target.checked)} />
-            <span>Ich habe die <button type="button" className="kc-inline-link" onClick={() => setZeigeTeilnahmebedingungen((v) => !v)}>Teilnahmebedingungen</button> gelesen und akzeptiere sie für unsere Mannschaft. *</span>
+            <span>Ich habe die <button type="button" className="kc-inline-link" onClick={() => setZeigeTeilnahmebedingungen((v) => !v)}>Teilnahmebedingungen</button> gelesen und akzeptiere sie für unsere Mannschaft(en). *</span>
           </label>
           {zeigeTeilnahmebedingungen && <TeilnahmebedingungenText />}
         </div>
@@ -1403,14 +2210,14 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
         <div className="kc-datenschutz">
           <label className="kc-checkbox-zeile">
             <input type="checkbox" checked={fotoEinverstaendnis} onChange={(e) => setFotoEinverstaendnis(e.target.checked)} />
-            <span>Wir sind damit einverstanden, dass beim Turnier entstandene Foto- und Videoaufnahmen unseres Teams für Social Media, Website und Presse des Veranstalters verwendet werden dürfen (freiwillig, jederzeit widerrufbar).</span>
+            <span>Wir sind damit einverstanden, dass beim Turnier entstandene Foto- und Videoaufnahmen unserer/unseres Teams für Social Media, Website und Presse des Veranstalters verwendet werden dürfen (freiwillig, jederzeit widerrufbar).</span>
           </label>
         </div>
 
         <p className="kc-notiz">* Pflichtangabe</p>
 
-        <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig}>
-          {frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
+        <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig || wirdGeprueft}>
+          {wirdGeprueft ? "Wird geprüft …" : anzahlMannschaften > 1 ? `${anzahlMannschaften} Mannschaften anmelden` : frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
         </button>
       </form>
     </div>
@@ -1436,7 +2243,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
       <div className="kc-status-karte">
         <span className="kc-status-badge" style={{ background: STATUS_FARBE[status] }}>{STATUS_LABEL[status]}</span>
         <h1 className="kc-h1">{turnier ? turnier.name : "Turnier"}</h1>
-        <p className="kc-sub">{turnier ? `${formatDatum(turnier.datum)} · ${turnier.ort}` : ""}</p>
+        <p className="kc-sub">{turnier ? `${formatTermin(turnier)} · ${turnier.ort}` : ""}</p>
 
         <dl className="kc-details">
           <div><dt>Verein</dt><dd>{anmeldung.verein}</dd></div>
@@ -1451,15 +2258,30 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           )}
         </dl>
 
-        {status === "ausstehend" && turnier && turnier.zahlLink && (
+        {status === "ausstehend" && turnier && (turnier.zahlLink || turnier.iban) && (
           <div className="kc-zahl-block">
-            <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
-              Startgebühr jetzt bezahlen ({turnier.preis} €)
-            </a>
-            <div className="kc-app-tipp">
-              💡 Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
-              „Im Browser öffnen" wählen.
-            </div>
+            {turnier.zahlLink && (
+              <>
+                <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
+                  Startgebühr jetzt bezahlen ({turnier.preis} €)
+                </a>
+                <div className="kc-app-tipp">
+                  💡 Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
+                  „Im Browser öffnen" wählen.
+                </div>
+              </>
+            )}
+            {turnier.iban && (
+              <div className="kc-bank-info">
+                <strong>Alternativ per Überweisung zahlen:</strong>
+                <div className="kc-bank-info__zeile"><span>IBAN</span><span>{formatIban(turnier.iban)}</span></div>
+                {turnier.kontoinhaber && (
+                  <div className="kc-bank-info__zeile"><span>Kontoinhaber</span><span>{turnier.kontoinhaber}</span></div>
+                )}
+                <div className="kc-bank-info__zeile"><span>Betrag</span><span>{turnier.preis} €</span></div>
+                <div className="kc-bank-info__zeile"><span>Verwendungszweck</span><span>{anmeldung.verein} – {turnier.name}</span></div>
+              </div>
+            )}
             <div className="kc-zahlreferenz-zeile">
               <input
                 className="kc-input"
@@ -1483,15 +2305,21 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           </div>
         )}
 
+        {status === "eingegangen" && (
+          <p className="kc-hinweis">Danke für eure Anmeldung! Sie wird gerade vom Veranstalter geprüft. Sobald sie angenommen wurde, erscheint hier der Zahlungslink mit einer 3-Tage-Frist.</p>
+        )}
         {status === "zahlung_gemeldet" && (
           <p className="kc-hinweis">Danke! Deine Zahlung wird vom Veranstalter geprüft und in Kürze bestätigt.</p>
         )}
         {status === "bestaetigt" && (
           <>
-            <p className="kc-hinweis kc-hinweis--erfolg">Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!</p>
+            <p className="kc-hinweis kc-hinweis--erfolg">
+              Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!
+              {anmeldung.gebuehrenfrei && " Euer Team ist von der Startgebühr befreit."}
+            </p>
             {turnier && (
               <button className="kc-btn kc-btn--sekundaer" onClick={() => zahlungsBelegHerunterladen(anmeldung, turnier)}>
-                📄 Zahlungsbeleg herunterladen
+                📄 {anmeldung.gebuehrenfrei ? "Bestätigung herunterladen" : "Zahlungsbeleg herunterladen"}
               </button>
             )}
           </>
@@ -1552,18 +2380,21 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
 // Zeigt einen Spielplan (Gruppenphase oder K.o.) an. Im bearbeitbaren Modus können Ergebnisse
 // eingetragen werden; sonst ist es eine reine Lese-Ansicht für Teilnehmer.
-function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern }) {
+function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern }) {
   const teamName = (id) => {
     if (!id) return "Freilos";
+    if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
 
-  const inhalt = plan.modus === "gruppen" ? (
+  const gruppenBlock = plan.gruppen ? (
     <div className="kc-spielplan">
       {plan.gruppen.map((g) => {
         const tabelle = berechneTabelle(g, plan.spiele);
-        const spieleDerGruppe = plan.spiele.filter((s) => s.gruppeId === g.id);
+        const spieleDerGruppe = plan.spiele
+        .filter((s) => s.gruppeId === g.id)
+        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
         return (
           <div className="kc-gruppe-block" key={g.id}>
             <h3 className="kc-h3">{g.name}</h3>
@@ -1587,15 +2418,16 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
             </table>
             <div className="kc-spiele-liste">
               {spieleDerGruppe.map((s) => (
-                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} />
+                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
               ))}
             </div>
           </div>
         );
       })}
     </div>
-  ) : (
-    // K.o.-System
+  ) : null;
+
+  const koBlock = plan.runden ? (
     <div className="kc-spielplan">
       {plan.runden.map((runde, i) => (
         <div className="kc-runde-block" key={i}>
@@ -1604,13 +2436,21 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
           </h3>
           <div className="kc-spiele-liste">
             {runde.map((s) => (
-              <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} zeigeSieger />
+              <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
             ))}
           </div>
         </div>
       ))}
+      {plan.platz3Spiel && (
+        <div className="kc-runde-block">
+          <h3 className="kc-h3">Spiel um Platz 3</h3>
+          <div className="kc-spiele-liste">
+            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
+          </div>
+        </div>
+      )}
     </div>
-  );
+  ) : null;
 
   return (
     <div>
@@ -1621,15 +2461,27 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
           </button>
         </div>
       )}
-      {inhalt}
+      {gruppenBlock}
+      {plan.modus === "gruppen_ko" && !plan.runden && (
+        <p className="kc-hinweis" style={{ margin: "10px 0" }}>
+          Die K.o.-Endrunde ist noch nicht gestartet – das kann der Veranstalter tun, sobald alle Gruppenspiele feststehen.
+        </p>
+      )}
+      {plan.modus === "gruppen_ko" && plan.runden && (
+        <h3 className="kc-h3" style={{ marginTop: "18px" }}>K.o.-Endrunde</h3>
+      )}
+      {koBlock}
     </div>
   );
 }
 
-function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) {
+function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger }) {
   const [heim, setHeim] = useState(spiel.heimTore ?? "");
   const [gast, setGast] = useState(spiel.gastTore ?? "");
   const [siegerWahl, setSiegerWahl] = useState("");
+  const [zeitBearbeiten, setZeitBearbeiten] = useState(false);
+  const [uhrzeitEingabe, setUhrzeitEingabe] = useState(spiel.uhrzeit || "");
+  const [feldEingabe, setFeldEingabe] = useState(spiel.feld || "");
   const hatErgebnis = spiel.heimTore !== null && spiel.gastTore !== null;
   const wartetAufTeams = !spiel.heimId || !spiel.gastId;
 
@@ -1648,8 +2500,36 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) 
     onSpeichern(spiel.id, h, g, siegerWahl || null);
   };
 
+  const zeitSpeichern = () => {
+    onZeitSpeichern(spiel.id, uhrzeitEingabe || null, feldEingabe ? Number(feldEingabe) : null);
+    setZeitBearbeiten(false);
+  };
+
   return (
     <div className="kc-spiel-zeile">
+      {bearbeitbar && onZeitSpeichern && zeitBearbeiten ? (
+        <div className="kc-spiel-zeit-bearbeiten">
+          <input className="kc-input kc-input--klein" type="time" value={uhrzeitEingabe} onChange={(e) => setUhrzeitEingabe(e.target.value)} />
+          <input className="kc-input kc-input--klein" type="number" min="1" placeholder="Feld" value={feldEingabe} onChange={(e) => setFeldEingabe(e.target.value)} style={{ width: "60px" }} />
+          <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={zeitSpeichern}>✓</button>
+          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeitBearbeiten(false)}>✕</button>
+        </div>
+      ) : (
+        <span className="kc-spiel-meta">
+          {spiel.rueckspiel ? "🔁 Rückspiel  " : ""}
+          {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : bearbeitbar && onZeitSpeichern ? "Uhrzeit/Feld noch nicht festgelegt" : ""}
+          {bearbeitbar && onZeitSpeichern && (
+            <button
+              type="button"
+              className="kc-inline-link"
+              style={{ marginLeft: "8px", fontSize: "11.5px" }}
+              onClick={() => { setUhrzeitEingabe(spiel.uhrzeit || ""); setFeldEingabe(spiel.feld || ""); setZeitBearbeiten(true); }}
+            >
+              {spiel.uhrzeit ? "ändern" : "festlegen"}
+            </button>
+          )}
+        </span>
+      )}
       <span className={zeigeSieger && spiel.sieger === spiel.heimId ? "kc-team-sieger" : ""}>{teamName(spiel.heimId)}</span>
       {bearbeitbar && !wartetAufTeams ? (
         <div className="kc-spiel-eingabe">
@@ -1678,9 +2558,15 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) 
 }
 
 // Erstellungs-Dialog: Modus frei wählbar (Gruppenphase oder K.o.-System), inkl. Anzahl Gruppen.
-function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
+function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
   const [modus, setModus] = useState("gruppen");
   const [anzahlGruppen, setAnzahlGruppen] = useState(2);
+  const [mitRueckrunde, setMitRueckrunde] = useState(false);
+  const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
+  const [qualifiziertProGruppe, setQualifiziertProGruppe] = useState(2);
+  const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "09:00");
+  const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [anzahlFelder, setAnzahlFelder] = useState(1);
   const anzahlTeams = bestaetigteTeams.length;
   const zuWenigTeams = anzahlTeams < 2;
 
@@ -1696,10 +2582,11 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
             <span>Turnierformat</span>
             <select className="kc-input" value={modus} onChange={(e) => setModus(e.target.value)}>
               <option value="gruppen">Gruppenphase (jeder gegen jeden)</option>
+              <option value="gruppen_ko">Gruppenphase + anschließende K.o.-Endrunde</option>
               <option value="ko">K.o.-System</option>
             </select>
           </label>
-          {modus === "gruppen" && (
+          {(modus === "gruppen" || modus === "gruppen_ko") && (
             <label className="kc-feld">
               <span>Anzahl Gruppen</span>
               <input
@@ -1712,9 +2599,58 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
               />
             </label>
           )}
+          {(modus === "gruppen" || modus === "gruppen_ko") && (
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
+              <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
+            </label>
+          )}
+          {modus === "gruppen_ko" && (
+            <label className="kc-feld">
+              <span>Wie viele Mannschaften kommen pro Gruppe weiter?</span>
+              <input
+                className="kc-input"
+                type="number"
+                min="1"
+                max={Math.max(1, Math.floor(anzahlTeams / anzahlGruppen))}
+                value={qualifiziertProGruppe}
+                onChange={(e) => setQualifiziertProGruppe(Number(e.target.value))}
+              />
+              <span className="kc-notiz">Die K.o.-Endrunde selbst wird erst gestartet, sobald alle Gruppenspiele feststehen.</span>
+            </label>
+          )}
+          {(modus === "ko" || modus === "gruppen_ko") && (
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
+              <span>Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)</span>
+            </label>
+          )}
+          <div className="kc-feld-reihe">
+            <label className="kc-feld">
+              <span>Startzeit</span>
+              <input className="kc-input" type="time" value={startzeit} onChange={(e) => setStartzeit(e.target.value)} />
+            </label>
+            <label className="kc-feld">
+              <span>Spieldauer je Spiel (Minuten)</span>
+              <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
+            </label>
+          </div>
+          <label className="kc-feld">
+            <span>Anzahl Felder/Plätze</span>
+            <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
+          </label>
+          <p className="kc-notiz">
+            Uhrzeit und Feld werden automatisch verteilt – nach Möglichkeit mit mindestens einer Spielrunde Pause pro Mannschaft.
+            {modus === "gruppen_ko" && " Das gilt zunächst nur für die Gruppenphase, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
+          </p>
           <button
             className="kc-btn kc-btn--primary"
-            onClick={() => onErstellen(modus, modus === "gruppen" ? anzahlGruppen : null)}
+            onClick={() => onErstellen(
+              modus,
+              modus === "gruppen" || modus === "gruppen_ko" ? anzahlGruppen : null,
+              { startzeit, spieldauerMin, anzahlFelder },
+              { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe }
+            )}
           >
             Spielplan erstellen
           </button>
@@ -1724,16 +2660,102 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
   );
 }
 
-function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onNeuErstellen }) {
+// Kleines Extra-Formular: startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination,
+// sobald die Gruppenphase abgeschlossen ist. Fragt eigene Startzeit/Spieldauer/Felder ab, da die
+// Endrunde meist zu einem späteren Zeitpunkt am Turniertag beginnt.
+function EndrundeStarten({ onEndrundeStarten, turnier }) {
+  const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
+  const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [anzahlFelder, setAnzahlFelder] = useState(1);
+
+  return (
+    <div className="kc-section kc-formular-karte" style={{ marginTop: "16px" }}>
+      <h2 className="kc-h2">K.o.-Endrunde starten</h2>
+      <p className="kc-sub">
+        Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut
+        daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen.
+      </p>
+      <div className="kc-formular">
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Startzeit der Endrunde</span>
+            <input className="kc-input" type="time" value={startzeit} onChange={(e) => setStartzeit(e.target.value)} />
+          </label>
+          <label className="kc-feld">
+            <span>Spieldauer je Spiel (Minuten)</span>
+            <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
+          </label>
+        </div>
+        <label className="kc-feld">
+          <span>Anzahl Felder/Plätze</span>
+          <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
+        </label>
+        <button className="kc-btn kc-btn--primary" onClick={() => onEndrundeStarten({ startzeit, spieldauerMin, anzahlFelder })}>
+          Endrunde jetzt auslosen &amp; starten
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Erlaubt dem Admin, pro Mannschaft einen eigenen Anzeigenamen für den Spielplan zu vergeben
+// (z. B. "Kickers Lila" / "Kickers Gold", wenn ein Verein mehrere Teams meldet, ohne sie in der
+// Anmeldung selbst klar zu unterscheiden). Ändert nur die Anzeige, nicht die eigentliche Anmeldung.
+function TeamNamenBearbeiten({ bestaetigteTeams, teamNamen, onSpeichern }) {
+  const [offen, setOffen] = useState(false);
+  const [eingaben, setEingaben] = useState({});
+
+  if (bestaetigteTeams.length === 0) return null;
+
+  const wertFuer = (teamId) => (eingaben[teamId] !== undefined ? eingaben[teamId] : (teamNamen?.[teamId] || ""));
+
+  return (
+    <div className="kc-section kc-formular-karte">
+      <div className="kc-admin-aktionen" style={{ marginTop: 0 }}>
+        <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setOffen((v) => !v)}>
+          {offen ? "Teamnamen ausblenden" : "🏷️ Teamnamen anpassen"}
+        </button>
+      </div>
+      {offen && (
+        <>
+          <p className="kc-notiz">
+            Nützlich, wenn ein Verein mehrere Mannschaften meldet, ohne sie klar zu unterscheiden
+            (z. B. "Kickers Lila" / "Kickers Gold"). Ändert nur die Anzeige im Spielplan, nicht die Anmeldung selbst.
+          </p>
+          <div className="kc-anmeldungs-tabelle">
+            {bestaetigteTeams.map((a) => (
+              <div className="kc-anmeldungs-zeile" key={a.id}>
+                <div>
+                  <strong>{a.verein}</strong>
+                  <div className="kc-notiz">{a.jahrgang} / {a.jugend}</div>
+                </div>
+                <input
+                  className="kc-input kc-input--klein"
+                  placeholder={a.verein}
+                  value={wertFuer(a.id)}
+                  onChange={(e) => setEingaben({ ...eingaben, [a.id]: e.target.value })}
+                  onBlur={(e) => onSpeichern(a.id, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onEndrundeStarten, onNamenSpeichern, onNeuErstellen }) {
   const bestaetigteTeams = anmeldungen.filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt");
   const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(spielplanLink)}`;
+  const endrundeAusstehend = plan && plan.modus === "gruppen_ko" && !plan.runden;
 
   return (
     <div className="kc-section">
       <h2 className="kc-h2">Spielplan: {turnier.name}</h2>
       {!plan ? (
-        <SpielplanErstellen bestaetigteTeams={bestaetigteTeams} onErstellen={onErstellen} />
+        <SpielplanErstellen bestaetigteTeams={bestaetigteTeams} turnier={turnier} onErstellen={onErstellen} />
       ) : (
         <>
           <div className="kc-admin-aktionen">
@@ -1750,7 +2772,11 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
             </div>
           </div>
 
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} />
+          <TeamNamenBearbeiten bestaetigteTeams={bestaetigteTeams} teamNamen={plan.teamNamen} onSpeichern={onNamenSpeichern} />
+
+          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
+
+          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} />}
         </>
       )}
     </div>
@@ -1788,12 +2814,143 @@ function monateSeitDatum(datumIso) {
   return (jetzt.getFullYear() - dann.getFullYear()) * 12 + (jetzt.getMonth() - dann.getMonth());
 }
 
-function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spielplaene, setSpielplaene, dokumente, setDokumente, belegtePlaetze, jetzt }) {
+// ---------- Sponsoring-Ansicht ----------
+//
+// Bewusst ohne eigene Datenbank-Tabelle gehalten: Das Formular sammelt die Angaben
+// nur, um daraus eine vorausgefüllte WhatsApp-Nachricht an den Veranstalter zu bauen.
+// Der Sponsor tippt am Ende in seiner eigenen WhatsApp-App nur noch auf "Senden" -
+// alle Daten landen damit direkt und vollständig im Chat, ohne Umweg über eine Datenbank.
+
+const SPONSOR_BUDGET_OPTIONEN = [
+  "unter 250 €",
+  "250 – 500 €",
+  "500 – 1.000 €",
+  "1.000 – 2.500 €",
+  "mehr als 2.500 €",
+  "Sachleistung / anderes Angebot",
+];
+
+function SponsorAnsicht() {
+  const [form, setForm] = useState({ firma: "", ansprechpartner: "", email: "", telefon: "", budget: "", nachricht: "" });
+  const [wirdGesendet, setWirdGesendet] = useState(false);
+  const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
+
+  const gueltig = form.firma.trim() && form.ansprechpartner.trim() && form.email.trim();
+
+  const whatsappNachricht = [
+    "Hallo KidzCup-Team,",
+    "",
+    "wir möchten uns gerne als Sponsor bewerben:",
+    "",
+    `Firma: ${form.firma || "–"}`,
+    `Ansprechpartner: ${form.ansprechpartner || "–"}`,
+    `E-Mail: ${form.email || "–"}`,
+    form.telefon ? `Telefon: ${form.telefon}` : null,
+    `Geplantes Budget: ${form.budget || "noch offen"}`,
+    form.nachricht ? "" : null,
+    form.nachricht ? "Nachricht:" : null,
+    form.nachricht || null,
+  ].filter((zeile) => zeile !== null).join("\n");
+
+  // Speichert die Anfrage zusätzlich in der Datenbank, damit nichts verloren geht,
+  // selbst wenn die WhatsApp-Nachricht später übersehen oder gelöscht wird.
+  // Schlägt das Speichern fehl, wird der Sponsor trotzdem zu WhatsApp weitergeleitet -
+  // die Kontaktaufnahme soll daran nicht scheitern.
+  const kontaktAufnehmen = async (e) => {
+    e.preventDefault();
+    if (!gueltig || wirdGesendet) return;
+    setWirdGesendet(true);
+    try {
+      await supabaseInsert("sponsoren", {
+        id: neueId("sponsor"),
+        firma: form.firma.trim(),
+        ansprechpartner: form.ansprechpartner.trim(),
+        email: form.email.trim(),
+        telefon: form.telefon.trim() || null,
+        budget: form.budget || null,
+        nachricht: form.nachricht.trim() || null,
+      });
+    } catch (e) {
+      console.warn("Sponsor-Anfrage konnte nicht gespeichert werden:", e.message);
+    } finally {
+      setWirdGesendet(false);
+      window.open(whatsappLink(VERANSTALTER.telefon, whatsappNachricht), "_blank");
+    }
+  };
+
+  return (
+    <div>
+      <section className="kc-section">
+        <h1 className="kc-h1">Sponsor werden</h1>
+        <p className="kc-sub">
+          Werdet Partner von {VERANSTALTER.name} und unterstützt den Jugendfußball in der Region.
+          Füllt kurz eure Angaben aus – im letzten Schritt öffnet sich WhatsApp mit einer bereits
+          vorausgefüllten Nachricht direkt an uns.
+        </p>
+      </section>
+
+      <div className="kc-formular kc-formular-karte kc-section">
+        <label className="kc-feld">
+          <span>Firma *</span>
+          <input className="kc-input" value={form.firma} onChange={feld("firma")} placeholder="Firmenname" required />
+        </label>
+        <label className="kc-feld">
+          <span>Ansprechpartner *</span>
+          <input className="kc-input" value={form.ansprechpartner} onChange={feld("ansprechpartner")} placeholder="Vor- und Nachname" required />
+        </label>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>E-Mail *</span>
+            <input className="kc-input" type="email" value={form.email} onChange={feld("email")} required />
+          </label>
+          <label className="kc-feld">
+            <span>Telefon (optional)</span>
+            <input className="kc-input" type="tel" value={form.telefon} onChange={feld("telefon")} />
+          </label>
+        </div>
+        <label className="kc-feld">
+          <span>Geplantes Sponsoring-Budget</span>
+          <select className="kc-input" value={form.budget} onChange={feld("budget")}>
+            <option value="">Bitte wählen (optional)…</option>
+            {SPONSOR_BUDGET_OPTIONEN.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </label>
+        <label className="kc-feld">
+          <span>Nachricht (optional)</span>
+          <textarea
+            className="kc-input kc-textarea"
+            rows={4}
+            value={form.nachricht}
+            onChange={feld("nachricht")}
+            placeholder="Erzählt uns von euren Ideen, Wünschen oder Fragen zum Sponsoring …"
+          />
+        </label>
+
+        <p className="kc-notiz">* Pflichtangabe</p>
+
+        <button className="kc-btn kc-btn--primary" type="button" disabled={!gueltig || wirdGesendet} onClick={kontaktAufnehmen}>
+          📱 Jetzt per WhatsApp Kontakt aufnehmen
+        </button>
+        <p className="kc-notiz">
+          Beim Klick öffnet sich WhatsApp mit einer vorausgefüllten Nachricht an {VERANSTALTER.name} –
+          ihr müsst dort nur noch auf „Senden" tippen.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
+function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, dokumente, setDokumente, jetzt, belegungNeuLaden }) {
   const [session, setSession] = useState(null); // { access_token, user }
   const [sitzungWirdGeprueft, setSitzungWirdGeprueft] = useState(true);
   const [adminProfil, setAdminProfil] = useState(null); // Zeile aus admin_profile: { user_id, name, email, erstellt_am }
   const [admins, setAdmins] = useState([]); // alle admin_profile-Einträge, für "Admins verwalten"
   const [profilLaedt, setProfilLaedt] = useState(false);
+  const [anmeldungen, setAnmeldungen] = useState([]); // volle Anmeldedaten - nur nach Admin-Login geladen
+  const [anmeldungenLaedt, setAnmeldungenLaedt] = useState(true);
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -1802,7 +2959,18 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
   const [zeigeAdminsVerwalten, setZeigeAdminsVerwalten] = useState(false);
   const [zeigeDatenschutzTools, setZeigeDatenschutzTools] = useState(false);
   const [zeigeDokumenteVerwalten, setZeigeDokumenteVerwalten] = useState(false);
+  const [zeigeSponsorAnfragen, setZeigeSponsorAnfragen] = useState(false);
+  const [sponsorAnfragen, setSponsorAnfragen] = useState([]);
+  const [sponsorAnfragenLaedt, setSponsorAnfragenLaedt] = useState(false);
+  const [zeigeEinnahmen, setZeigeEinnahmen] = useState(false);
+  const [vcfExport, setVcfExport] = useState(null); // { turnierId, url, dateiname } - lang-drückbarer Kontakte-Export-Link
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
+  const [adminMonatFilter, setAdminMonatFilter] = useState("");
+  const [adminJugendFilter, setAdminJugendFilter] = useState("");
+  const [verschiebeAnmeldung, setVerschiebeAnmeldung] = useState(null); // Anmeldung, die gerade verschoben wird
+  const [verschiebeZielTurnier, setVerschiebeZielTurnier] = useState("");
+  const [verschiebeZielJugend, setVerschiebeZielJugend] = useState("");
+  const [verschiebeZielStatus, setVerschiebeZielStatus] = useState("behalten"); // "behalten" | "warteliste"
 
   const nachLoginProfilLaden = async (neueSession) => {
     setProfilLaedt(true);
@@ -1844,6 +3012,24 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Die vollen Anmeldedaten (inkl. E-Mail/Telefon) werden bewusst erst HIER geladen, mit dem
+  // eigenen Admin-Zugangstoken - nicht mehr zentral beim Start der App für alle Besucher.
+  useEffect(() => {
+    if (!session || !adminProfil) return;
+    (async () => {
+      setAnmeldungenLaedt(true);
+      try {
+        const zeilen = await supabaseSelect("anmeldungen", "?select=*", session.access_token);
+        setAnmeldungen(zeilen.map(anmeldungAusDb));
+      } catch (e) {
+        console.warn("Anmeldungen konnten nicht geladen werden:", e.message);
+      } finally {
+        setAnmeldungenLaedt(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, adminProfil]);
+
   if (sitzungWirdGeprueft) {
     return <div className="kc-section">Lädt …</div>;
   }
@@ -1881,6 +3067,16 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     );
   }
 
+  if (anmeldungenLaedt) {
+    return <div className="kc-section">Lädt …</div>;
+  }
+
+  const belegtePlaetze = (turnierId) => {
+    return anmeldungen.filter(
+      (a) => a.turnierId === turnierId && ["eingegangen", "ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
+    ).length;
+  };
+
   const abmelden = async () => {
     await supabaseAbmelden(session.access_token);
     sitzungLoeschen();
@@ -1890,15 +3086,44 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
   };
 
   const neuesTurnierAnlegen = async (daten) => {
-    const roh = { id: neueId("turnier"), ...daten, erstelltAm: Date.now() };
+    const { logoDatei, logoEntfernen, ...restDaten } = daten;
+    const roh = { id: neueId("turnier"), ...restDaten, erstelltAm: Date.now() };
     const zeile = await supabaseInsert("turniere", turnierZuDb(roh), session.access_token);
-    setTurniere((prev) => [...prev, turnierAusDb(zeile[0])]);
+    let neuesTurnier = turnierAusDb(zeile[0]);
+    if (logoDatei) {
+      try {
+        const endung = logoDatei.name.includes(".") ? logoDatei.name.slice(logoDatei.name.lastIndexOf(".")) : "";
+        const pfad = `logos/${roh.id}-${Date.now()}${endung}`;
+        await supabaseDateiHochladen(pfad, logoDatei, session.access_token);
+        const aktualisiert = await supabaseUpdate("turniere", roh.id, { logo_pfad: pfad }, session.access_token);
+        neuesTurnier = turnierAusDb(aktualisiert[0]);
+      } catch (e) {
+        alert("Turnier wurde gespeichert, aber das Logo konnte nicht hochgeladen werden: " + e.message);
+      }
+    }
+    setTurniere((prev) => [...prev, neuesTurnier]);
     setZeigeFormular(false);
   };
 
   const turnierAktualisieren = async (daten) => {
     const id = bearbeitetesTurnier.id;
-    const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...daten }), session.access_token);
+    const { logoDatei, logoEntfernen, ...restDaten } = daten;
+    let logoPfad = bearbeitetesTurnier.logoPfad || null;
+    try {
+      if (logoEntfernen && logoPfad) {
+        await supabaseDateiLoeschen(logoPfad, session.access_token);
+        logoPfad = null;
+      }
+      if (logoDatei) {
+        if (logoPfad) await supabaseDateiLoeschen(logoPfad, session.access_token);
+        const endung = logoDatei.name.includes(".") ? logoDatei.name.slice(logoDatei.name.lastIndexOf(".")) : "";
+        logoPfad = `logos/${id}-${Date.now()}${endung}`;
+        await supabaseDateiHochladen(logoPfad, logoDatei, session.access_token);
+      }
+    } catch (e) {
+      alert("Hinweis: Logo-Änderung konnte nicht vollständig gespeichert werden: " + e.message);
+    }
+    const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...restDaten, logoPfad }), session.access_token);
     setTurniere((prev) => prev.map((t) => (t.id === id ? turnierAusDb(zeile[0]) : t)));
     setBearbeitetesTurnier(null);
     setZeigeFormular(false);
@@ -1913,6 +3138,98 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     if (offenesTurnier === id) setOffenesTurnier(null);
   };
 
+  // Neuer Zwischenschritt: Admin nimmt die Anmeldung an, erst jetzt startet die Zahlungsfrist.
+  const anmeldungAnnehmen = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const neueFrist = Date.now() + DREI_TAGE_MS;
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigen("angenommen", aktualisierteAnmeldung, turnier);
+    }
+  };
+
+  // Admin kann eine neu eingegangene Anmeldung auch bewusst auf die Warteliste setzen,
+  // z. B. um zunächst Kapazität für andere/bevorzugte Vereine freizuhalten.
+  const anmeldungAufWartelisteSetzen = async (anmeldungId) => {
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "warteliste", frist: null, bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+  };
+
+  // Bestätigte (oder bereits angenommene) Mannschaft nachträglich zurück auf die Warteliste setzen.
+  // Rückerstattung/Verrechnung der Startgebühr läuft laut Veranstalter intern außerhalb der App.
+  const bestaetigtAufWartelisteSetzen = async (anmeldung) => {
+    const hinweis = anmeldung.gebuehrenfrei ? "" : "\n\nHinweis: Eine bereits gezahlte Startgebühr muss intern zurücküberwiesen bzw. verrechnet werden.";
+    if (!confirm(`"${anmeldung.verein}" (${anmeldung.jugend}) zurück auf die Warteliste setzen? Der Platz wird freigegeben.${hinweis}`)) return;
+    await anmeldungAufWartelisteSetzen(anmeldung.id);
+  };
+
+  const verschiebenOeffnen = (anmeldung) => {
+    setVerschiebeAnmeldung(anmeldung);
+    setVerschiebeZielTurnier(anmeldung.turnierId);
+    setVerschiebeZielJugend(anmeldung.jugend);
+    setVerschiebeZielStatus("behalten");
+  };
+
+  // Verschiebt eine Mannschaft in ein anderes Turnier und/oder ändert die Jugend-/Gruppenzuordnung.
+  const anmeldungVerschieben = async () => {
+    const a = verschiebeAnmeldung;
+    if (!a) return;
+    const turnierWechsel = verschiebeZielTurnier !== a.turnierId;
+    const jugendWechsel = verschiebeZielJugend !== a.jugend;
+    const statusWechsel = verschiebeZielStatus === "warteliste" && a.status !== "warteliste";
+    if (!turnierWechsel && !jugendWechsel && !statusWechsel) { setVerschiebeAnmeldung(null); return; }
+    const ziel = turniere.find((t) => t.id === verschiebeZielTurnier);
+    if (turnierWechsel && ziel && verschiebeZielStatus === "behalten" && a.status !== "warteliste") {
+      const belegtZiel = anmeldungen.filter((x) => x.turnierId === ziel.id && ["eingegangen", "ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(x.status)).length;
+      if (belegtZiel >= ziel.maxPlaetze &&
+          !confirm(`"${ziel.name}" ist bereits voll (${belegtZiel}/${ziel.maxPlaetze}). Trotzdem verschieben (Überbelegung)? Alternativ: im Dialog "Auf Warteliste des Ziels" wählen.`)) return;
+    }
+    const daten = { bearbeitet_von: adminProfil.name || "" };
+    if (turnierWechsel) daten.turnier_id = verschiebeZielTurnier;
+    if (jugendWechsel) daten.jugend = verschiebeZielJugend;
+    if (verschiebeZielStatus === "warteliste") { daten.status = "warteliste"; daten.frist = null; }
+    try {
+      const zeile = await supabaseUpdate("anmeldungen", a.id, daten, session.access_token);
+      const aktualisiert = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((x) => (x.id === a.id ? aktualisiert : x)));
+      belegungNeuLaden();
+      setVerschiebeAnmeldung(null);
+    } catch (e) {
+      alert("Verschieben fehlgeschlagen: " + e.message);
+    }
+  };
+
+  // Für Mannschaften, die keine Startgebühr zahlen müssen: direkt bestätigen, ganz ohne Zahlungsschritt.
+  const anmeldungKostenfreiAnnehmen = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "bestaetigt", gebuehrenfrei: true, bestaetigt_am: new Date().toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigen("bestaetigung", aktualisierteAnmeldung, turnier);
+    }
+  };
+
   const anmeldungAktualisieren = async (anmeldungId, neuerStatus) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "" };
@@ -1920,12 +3237,12 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
     setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
       const typ = neuerStatus === "bestaetigt" ? "bestaetigung" : neuerStatus === "abgelehnt" ? "ablehnung" : null;
       if (typ) {
-        benachrichtigeBackend(typ, aktualisierteAnmeldung, turnier);
-        mailOeffnen(typ, aktualisierteAnmeldung, turnier);
+        benachrichtigen(typ, aktualisierteAnmeldung, turnier);
       }
     }
   };
@@ -1940,17 +3257,35 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     );
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
     setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigeBackend("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
-      mailOeffnen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
+      benachrichtigen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
     }
   };
 
   const erinnerungSenden = (anmeldung) => {
     const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-    benachrichtigeBackend("erinnerung", anmeldung, turnier);
-    mailOeffnen("erinnerung", anmeldung, turnier);
+    benachrichtigen("erinnerung", anmeldung, turnier);
+  };
+
+  // Verlängert die abgelaufene Zahlungsfrist um weitere 3 Tage, ohne den Platz freizugeben.
+  // Informiert den Verein automatisch über die neue Frist (nutzt dieselbe Vorlage wie "Erinnerung").
+  const fristVerlaengern = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const neueFrist = Date.now() + DREI_TAGE_MS;
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigen("frist_verlaengert", aktualisierteAnmeldung, turnier);
+    }
   };
 
   const alleExportieren = () => {
@@ -1967,6 +3302,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     if (!confirm(`Anmeldung von "${anmeldung.verein}" (${anmeldung.jugend}) wirklich endgültig löschen?`)) return;
     await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
     setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
+    belegungNeuLaden();
   };
 
   // Löschkonzept: personenbezogene Anmeldedaten zu Turnieren, die lange zurückliegen, bereinigen.
@@ -1977,17 +3313,53 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== turnier.id));
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
+    belegungNeuLaden();
   };
 
-  const spielplanErstellen = async (turnier, modus, anzahlGruppen) => {
+  const spielplanErstellen = async (turnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => {
     const bestaetigteIds = anmeldungen
       .filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt")
       .map((a) => a.id);
-    const neuerPlan = modus === "gruppen" ? erstelleGruppenplan(bestaetigteIds, anzahlGruppen) : erstelleKoPlan(bestaetigteIds);
+    const { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe } = zusatzOptionen || {};
+
+    let neuerPlan;
+    if (modus === "gruppen" || modus === "gruppen_ko") {
+      neuerPlan = erstelleGruppenplan(bestaetigteIds, anzahlGruppen, mitRueckrunde);
+      if (modus === "gruppen_ko") {
+        neuerPlan.modus = "gruppen_ko";
+        neuerPlan.qualifiziertProGruppe = qualifiziertProGruppe || 2;
+        neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3;
+      }
+    } else {
+      neuerPlan = erstelleKoPlan(bestaetigteIds, { spielUmPlatz3 });
+    }
+    if (zeitOptionen) neuerPlan = planMitZeitenUndFeldern(neuerPlan, zeitOptionen);
     await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
     const roh = { id: neueId("plan"), turnierId: turnier.id, erstelltAm: Date.now(), ...neuerPlan };
     const zeile = await supabaseInsert("spielplaene", spielplanZuDb(roh), session.access_token);
     setSpielplaene((prev) => [...prev.filter((p) => p.turnierId !== turnier.id), spielplanAusDb(zeile[0])]);
+  };
+
+  // Startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination: ermittelt die besten N Teams
+  // je Gruppe (nach Tabelle) und baut daraus einen frischen K.o.-Baum, der an die bestehende
+  // Gruppenphase angehängt wird - die Gruppendaten selbst bleiben dabei vollständig erhalten.
+  const endrundeStarten = async (turnier, plan, zeitOptionen) => {
+    const proGruppeQualifiziert = plan.gruppen.flatMap((g) => {
+      const tabelle = berechneTabelle(g, plan.spiele);
+      return tabelle.slice(0, plan.qualifiziertProGruppe || 2).map((r) => r.teamId);
+    });
+    if (proGruppeQualifiziert.length < 2) {
+      alert("Zu wenige qualifizierte Mannschaften für eine Endrunde.");
+      return;
+    }
+    const koTeil = erstelleKoPlan(proGruppeQualifiziert, { spielUmPlatz3: plan.spielUmPlatz3Wunsch });
+    if (zeitOptionen) {
+      const planbar = (koTeil.runden[0] || []).filter((s) => s.heimId && s.gastId && !s.freilos);
+      zeitenZuweisenAnListe(planbar, zeitOptionen);
+    }
+    const aktualisiert = { ...plan, runden: koTeil.runden, platz3Spiel: koTeil.platz3Spiel };
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
   };
 
   const spielplanNeuErstellen = async (turnier) => {
@@ -2000,6 +3372,29 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     const plan = spielplaene.find((p) => p.turnierId === turnierId);
     if (!plan) return;
     const aktualisiert = spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden);
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+  };
+
+  // Manuelle Anpassung von Uhrzeit/Feld - z. B. bei Verzögerungen am Turniertag. Über den
+  // bestehenden Live-Abgleich sehen alle anderen Geräte die neue Zeit automatisch nach.
+  const zeitSpeichern = async (turnierId, spielId, uhrzeit, feld) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return;
+    const aktualisiert = spielplanMitZeit(plan, spielId, uhrzeit, feld);
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+  };
+
+  // Ändert nur die Anzeige im Spielplan (z. B. "Kickers Lila" statt zweimal "Kickers"),
+  // ohne die eigentliche Anmeldung/Kontaktdaten anzufassen.
+  const teamNamenSpeichern = async (turnierId, teamId, name) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return;
+    const neueNamen = { ...(plan.teamNamen || {}) };
+    if (name && name.trim()) neueNamen[teamId] = name.trim();
+    else delete neueNamen[teamId];
+    const aktualisiert = { ...plan, teamNamen: neueNamen };
     const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
     setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
   };
@@ -2034,6 +3429,29 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     }
   };
 
+  const sponsorAnfragenLaden = async () => {
+    setSponsorAnfragenLaedt(true);
+    try {
+      const zeilen = await supabaseSelect("sponsoren", "?select=*&order=erstellt_am.desc", session.access_token);
+      setSponsorAnfragen(zeilen);
+    } catch (e) {
+      alert("Sponsor-Anfragen konnten nicht geladen werden: " + e.message);
+    } finally {
+      setSponsorAnfragenLaedt(false);
+    }
+  };
+
+  const sponsorAnfrageMarkieren = async (id, bearbeitet) => {
+    const zeile = await supabaseUpdate("sponsoren", id, { bearbeitet }, session.access_token);
+    setSponsorAnfragen((prev) => prev.map((s) => (s.id === id ? zeile[0] : s)));
+  };
+
+  const sponsorAnfrageLoeschen = async (id) => {
+    if (!confirm("Diese Sponsor-Anfrage wirklich löschen?")) return;
+    await supabaseDelete("sponsoren", id, session.access_token);
+    setSponsorAnfragen((prev) => prev.filter((s) => s.id !== id));
+  };
+
   if (offenerSpielplanTurnier) {
     const plan = spielplaene.find((p) => p.turnierId === offenerSpielplanTurnier.id) || null;
     return (
@@ -2043,8 +3461,11 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
           turnier={offenerSpielplanTurnier}
           anmeldungen={anmeldungen}
           plan={plan}
-          onErstellen={(modus, anzahlGruppen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen)}
+          onErstellen={(modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen)}
           onSpielSpeichern={(spielId, h, g, sieger) => spielSpeichern(offenerSpielplanTurnier.id, spielId, h, g, sieger)}
+          onZeitSpeichern={(spielId, uhrzeit, feld) => zeitSpeichern(offenerSpielplanTurnier.id, spielId, uhrzeit, feld)}
+          onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
+          onNamenSpeichern={(teamId, name) => teamNamenSpeichern(offenerSpielplanTurnier.id, teamId, name)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
         />
       </div>
@@ -2072,6 +3493,19 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeDokumenteVerwalten((v) => !v)}>
               Dokumente
             </button>
+            <button
+              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+              onClick={() => {
+                const neuerStatus = !zeigeSponsorAnfragen;
+                setZeigeSponsorAnfragen(neuerStatus);
+                if (neuerStatus) sponsorAnfragenLaden();
+              }}
+            >
+              Sponsor-Anfragen
+            </button>
+            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeEinnahmen((v) => !v)}>
+              Einnahmenübersicht
+            </button>
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
               Alle als CSV exportieren
             </button>
@@ -2097,6 +3531,46 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
           onGeaendert={() => setZeigePasswortAendern(false)}
           onAbbrechen={() => setZeigePasswortAendern(false)}
         />
+      )}
+
+      {verschiebeAnmeldung && (
+        <div className="kc-overlay" onClick={() => setVerschiebeAnmeldung(null)}>
+          <div className="kc-dialog" onClick={(e) => e.stopPropagation()}>
+            <h2 className="kc-h2">Mannschaft verschieben</h2>
+            <p className="kc-notiz">
+              <strong>{verschiebeAnmeldung.verein}</strong> – {verschiebeAnmeldung.jugend} · aktuell in „{turniere.find((t) => t.id === verschiebeAnmeldung.turnierId)?.name || "?"}“
+            </p>
+            <label className="kc-feld">
+              <span>Ziel-Turnier</span>
+              <select className="kc-input" value={verschiebeZielTurnier} onChange={(e) => setVerschiebeZielTurnier(e.target.value)}>
+                {[...turniere].sort((x, y) => (x.datum > y.datum ? 1 : -1)).map((t) => (
+                  <option key={t.id} value={t.id}>{t.name} ({formatDatum(t.datum)})</option>
+                ))}
+              </select>
+            </label>
+            <label className="kc-feld">
+              <span>Jugend / Gruppe</span>
+              <select className="kc-input" value={verschiebeZielJugend} onChange={(e) => setVerschiebeZielJugend(e.target.value)}>
+                {!JUGEND_KATEGORIEN.includes(verschiebeZielJugend) && <option value={verschiebeZielJugend}>{verschiebeZielJugend}</option>}
+                {JUGEND_KATEGORIEN.map((k) => (<option key={k} value={k}>{k}</option>))}
+              </select>
+            </label>
+            <label className="kc-feld">
+              <span>Status im Ziel</span>
+              <select className="kc-input" value={verschiebeZielStatus} onChange={(e) => setVerschiebeZielStatus(e.target.value)}>
+                <option value="behalten">Status behalten (z. B. bestätigt)</option>
+                <option value="warteliste">Auf Warteliste des Ziels</option>
+              </select>
+            </label>
+            <p className="kc-hinweis">
+              Es wird keine automatische Mail verschickt. Eine bereits gezahlte Startgebühr wird bei Bedarf intern zurücküberwiesen bzw. verrechnet.
+            </p>
+            <div className="kc-admin-aktionen">
+              <button className="kc-btn kc-btn--primary" onClick={anmeldungVerschieben}>Verschieben</button>
+              <button className="kc-btn kc-btn--sekundaer" onClick={() => setVerschiebeAnmeldung(null)}>Abbrechen</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {zeigeAdminsVerwalten && (
@@ -2130,6 +3604,24 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
         />
       )}
 
+      {zeigeSponsorAnfragen && (
+        <SponsorAnfragenVerwalten
+          anfragen={sponsorAnfragen}
+          laedt={sponsorAnfragenLaedt}
+          onMarkieren={sponsorAnfrageMarkieren}
+          onLoeschen={sponsorAnfrageLoeschen}
+          onSchliessen={() => setZeigeSponsorAnfragen(false)}
+        />
+      )}
+
+      {zeigeEinnahmen && (
+        <EinnahmenUebersicht
+          turniere={turniere}
+          anmeldungen={anmeldungen}
+          onSchliessen={() => setZeigeEinnahmen(false)}
+        />
+      )}
+
       {zeigeFormular && (
         <TurnierFormular
           bestehendesTurnier={bearbeitetesTurnier}
@@ -2140,10 +3632,52 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
 
       <div className="kc-liste">
         {turniere.length === 0 && <div className="kc-empty">Noch keine Turniere angelegt.</div>}
-        {[...turniere].sort((a, b) => new Date(a.datum) - new Date(b.datum)).map((t) => {
+        {turniere.length > 0 && (() => {
+          const sortiert = [...turniere].sort((a, b) => new Date(a.datum) - new Date(b.datum));
+          const verfuegbareMonate = Array.from(new Set(sortiert.map((t) => new Date(t.datum).getMonth()))).sort((a, b) => a - b);
+          const gefiltert = sortiert.filter((t) => {
+            if (adminMonatFilter !== "" && new Date(t.datum).getMonth() !== Number(adminMonatFilter)) return false;
+            if (adminJugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(adminJugendFilter)) return false;
+            return true;
+          });
+          return (
+            <>
+              <div className="kc-filter-leiste">
+                <label className="kc-feld">
+                  <span>Monat</span>
+                  <select className="kc-input" value={adminMonatFilter} onChange={(e) => setAdminMonatFilter(e.target.value)}>
+                    <option value="">Alle Monate</option>
+                    {verfuegbareMonate.map((m) => (
+                      <option key={m} value={m}>{MONATSNAMEN[m]}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="kc-feld">
+                  <span>Jugend</span>
+                  <select className="kc-input" value={adminJugendFilter} onChange={(e) => setAdminJugendFilter(e.target.value)}>
+                    <option value="">Alle Jugenden</option>
+                    {JUGEND_GRUPPEN.map((g) => (
+                      <option key={g.wert} value={g.wert}>{g.label}</option>
+                    ))}
+                  </select>
+                </label>
+                {(adminMonatFilter !== "" || adminJugendFilter !== "") && (
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); }}>
+                    Filter zurücksetzen
+                  </button>
+                )}
+              </div>
+              {gefiltert.length === 0 && <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>}
+              {gefiltert.map((t) => {
           const regsFuerTurnier = anmeldungen.filter((a) => a.turnierId === t.id);
           const wartelisteRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) === "warteliste");
           const aktiveRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) !== "warteliste");
+          // Neu eingegangene, noch unbearbeitete Anmeldungen zuerst - die brauchen deine Aufmerksamkeit am dringendsten.
+          const neueRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "eingegangen");
+          const bestaetigteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "bestaetigt");
+          const bearbeiteteRegs = aktiveRegs.filter((a) => !["eingegangen", "bestaetigt"].includes(effektiverStatus(a, jetzt)));
+          const anzahlInBearbeitung = bearbeiteteRegs.filter((a) => ["ausstehend", "zahlung_gemeldet"].includes(effektiverStatus(a, jetzt))).length;
+          const anzahlAbgelaufen = bearbeiteteRegs.filter((a) => effektiverStatus(a, jetzt) === "abgelaufen").length;
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offenesTurnier === t.id;
@@ -2156,6 +3690,16 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                   <span className="kc-zahl-label">belegt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
                 </div>
               </div>
+              {regsFuerTurnier.length > 0 && (
+                <div className="kc-status-zusammenfassung">
+                  <span className="kc-status-chip kc-status-chip--blau">🆕 {neueRegs.length} neue Anmeldung{neueRegs.length !== 1 ? "en" : ""}</span>
+                  <span className="kc-status-chip kc-status-chip--gelb">⏳ {anzahlInBearbeitung} in Bearbeitung</span>
+                  <span className="kc-status-chip kc-status-chip--gruen">✅ {bestaetigteRegs.length} bestätigt</span>
+                  {anzahlAbgelaufen > 0 && (
+                    <span className="kc-status-chip kc-status-chip--rot">⏰ {anzahlAbgelaufen} Frist abgelaufen</span>
+                  )}
+                </div>
+              )}
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
                 <div><dt>Ort</dt><dd>{t.ort}</dd></div>
@@ -2182,27 +3726,93 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                 >
                   CSV exportieren
                 </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => teilnehmerlisteAlsPdfHerunterladen(t, regsFuerTurnier, jetzt)}
+                  disabled={regsFuerTurnier.length === 0}
+                >
+                  📄 Teilnehmerliste als PDF
+                </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={async () => {
+                    const ergebnis = kontakteVcfVorbereiten(t, bestaetigteRegs);
+                    if (!ergebnis) { alert("Keine Telefonnummern zum Exportieren vorhanden."); return; }
+                    const datei = new File([ergebnis.blob], ergebnis.dateiname, { type: "text/vcard" });
+                    // Bevorzugt: natives Teilen-Menü (Mail/AirDrop/Nachrichten) - dort funktioniert
+                    // der Mehrfach-Kontakt-Import zuverlässig, anders als bei direktem Antippen in Safari.
+                    if (navigator.canShare && navigator.canShare({ files: [datei] })) {
+                      try {
+                        await navigator.share({ files: [datei], title: ergebnis.dateiname });
+                        return;
+                      } catch {
+                        // Abgebrochen oder nicht unterstützt - fällt durch zum Link als Rückfalllösung
+                      }
+                    }
+                    setVcfExport({ turnierId: t.id, ...ergebnis });
+                  }}
+                  disabled={bestaetigteRegs.length === 0}
+                  title="Legt alle bestätigten Vereine als Kontakte an - zum Import ins Adressbuch antippen"
+                >
+                  📇 Kontakte exportieren (bestätigt)
+                </button>
                 <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
               </div>
+
+              {vcfExport && vcfExport.turnierId === t.id && (
+                <div className="kc-vcf-hinweis">
+                  <p>
+                    <strong>Am zuverlässigsten:</strong> Datei unten per Mail an dich selbst schicken (Anhang) und
+                    aus der Mail-App heraus öffnen – dort erscheinen alle {vcfExport.anzahl} Kontakte zuverlässig
+                    mit „Alle hinzufügen". Direktes Antippen in Safari zeigt auf dem iPhone oft nur einen einzelnen Kontakt.
+                  </p>
+                  <a href={vcfExport.url} download={vcfExport.dateiname} className="kc-btn kc-btn--primary kc-btn--block">
+                    📇 {vcfExport.dateiname}
+                  </a>
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein" style={{ marginTop: "8px" }} onClick={() => setVcfExport(null)}>
+                    Schließen
+                  </button>
+                </div>
+              )}
 
               {offen && (
                 <div className="kc-anmeldungs-tabelle">
                   {regsFuerTurnier.length === 0 && <p className="kc-notiz">Noch keine Anmeldungen.</p>}
-                  {aktiveRegs.map((a) => {
+
+                  {neueRegs.length > 0 && (
+                    <div className="kc-neu-block">
+                      <h3 className="kc-h3 kc-h3--neu">🆕 Neue Anmeldungen ({neueRegs.length})</h3>
+                      {neueRegs.map((a) => {
                     const st = effektiverStatus(a, jetzt);
                     return (
                       <div className="kc-anmeldungs-zeile" key={a.id}>
                         <div>
                           <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
                           <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                          {(a.spielstaerke || a.jahrgangTyp) && (
+                            <div className="kc-notiz">
+                              {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
+                              {a.spielstaerke && a.jahrgangTyp && " · "}
+                              {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                            </div>
+                          )}
                           {a.notfallkontakt && <div className="kc-notiz">Notfallkontakt: {a.notfallkontakt}</div>}
                           <div className="kc-notiz">Frist: {formatDatumZeit(a.frist)}</div>
                           {a.zahlungsreferenz && <div className="kc-notiz">Referenz: {a.zahlungsreferenz}</div>}
                           {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
+                          {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                         </div>
                         <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
                           {STATUS_LABEL[st]}
                         </span>
+                        {st === "eingegangen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAnnehmen(a.id)}>✅ Anmeldung annehmen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungKostenfreiAnnehmen(a.id)}>🆓 Kostenfrei annehmen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungAufWartelisteSetzen(a.id)}>Auf Warteliste setzen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                          </div>
+                        )}
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
@@ -2211,12 +3821,28 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                         )}
                         {st === "ausstehend" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
                           </div>
                         )}
+                        {st === "abgelaufen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => fristVerlaengern(a.id)}>
+                              ⏱ Frist um 3 Tage verlängern
+                            </button>
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                          </div>
+                        )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => verschiebenOeffnen(a)}>
+                            ➡️ Verschieben
+                          </button>
                           <a
                             className="kc-btn kc-btn--sekundaer kc-btn--klein"
                             href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
@@ -2231,7 +3857,127 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                         </div>
                       </div>
                     );
-                  })}
+                      })}
+                    </div>
+                  )}
+
+                  {bestaetigteRegs.length > 0 && (
+                    <div className="kc-bestaetigt-block">
+                      <h3 className="kc-h3 kc-h3--bestaetigt">✅ Bestätigt ({bestaetigteRegs.length})</h3>
+                      {bestaetigteRegs.map((a) => (
+                        <div className="kc-anmeldungs-zeile" key={a.id}>
+                          <div>
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                            {(a.spielstaerke || a.jahrgangTyp) && (
+                              <div className="kc-notiz">
+                                {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
+                                {a.spielstaerke && a.jahrgangTyp && " · "}
+                                {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                              </div>
+                            )}
+                            {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
+                          </div>
+                          <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.bestaetigt }}>
+                            {STATUS_LABEL.bestaetigt}
+                          </span>
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => verschiebenOeffnen(a)}>
+                              ➡️ Verschieben
+                            </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => bestaetigtAufWartelisteSetzen(a)}>
+                              ⏸ Auf Warteliste setzen
+                            </button>
+                            <a
+                              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                              href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
+                              target="_blank"
+                              rel="noopener"
+                            >
+                              📱 WhatsApp
+                            </a>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
+                              🗑 Daten löschen
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {bearbeiteteRegs.length > 0 && (
+                    <div className={neueRegs.length > 0 || bestaetigteRegs.length > 0 ? "kc-bereits-bearbeitet-block" : undefined}>
+                      {(neueRegs.length > 0 || bestaetigteRegs.length > 0) && <h3 className="kc-h3">Weitere Anmeldungen ({bearbeiteteRegs.length})</h3>}
+                      {bearbeiteteRegs.map((a) => {
+                    const st = effektiverStatus(a, jetzt);
+                    return (
+                      <div className="kc-anmeldungs-zeile" key={a.id}>
+                        <div>
+                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                          <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                          {(a.spielstaerke || a.jahrgangTyp) && (
+                            <div className="kc-notiz">
+                              {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
+                              {a.spielstaerke && a.jahrgangTyp && " · "}
+                              {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                            </div>
+                          )}
+                          {a.notfallkontakt && <div className="kc-notiz">Notfallkontakt: {a.notfallkontakt}</div>}
+                          <div className="kc-notiz">Frist: {formatDatumZeit(a.frist)}</div>
+                          {a.zahlungsreferenz && <div className="kc-notiz">Referenz: {a.zahlungsreferenz}</div>}
+                          {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
+                          {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
+                        </div>
+                        <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
+                          {STATUS_LABEL[st]}
+                        </span>
+                        {st === "zahlung_gemeldet" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                          </div>
+                        )}
+                        {st === "ausstehend" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
+                              ✉️ Erinnerung senden
+                            </button>
+                          </div>
+                        )}
+                        {st === "abgelaufen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => fristVerlaengern(a.id)}>
+                              ⏱ Frist um 3 Tage verlängern
+                            </button>
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                          </div>
+                        )}
+                        <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => verschiebenOeffnen(a)}>
+                            ➡️ Verschieben
+                          </button>
+                          <a
+                            className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                            href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
+                            target="_blank"
+                            rel="noopener"
+                          >
+                            📱 WhatsApp
+                          </a>
+                          <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
+                            🗑 Daten löschen
+                          </button>
+                        </div>
+                      </div>
+                    );
+                      })}
+                    </div>
+                  )}
 
                   {wartelisteRegs.length > 0 && (
                     <div className="kc-warteliste-block">
@@ -2254,6 +4000,9 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                             >
                               {frei === 0 ? "Kein Platz frei" : "In Turnier aufnehmen"}
                             </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => verschiebenOeffnen(a)}>
+                              ➡️ Verschieben
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -2263,7 +4012,10 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
               )}
             </div>
           );
-        })}
+              })}
+            </>
+          );
+        })()}
       </div>
     </div>
   );
@@ -2598,21 +4350,148 @@ function DokumenteVerwalten({ turniere, dokumente, onHochladen, onLoeschen, onSc
   );
 }
 
+function SponsorAnfragenVerwalten({ anfragen, laedt, onMarkieren, onLoeschen, onSchliessen }) {
+  return (
+    <div className="kc-section kc-formular-karte">
+      <h2 className="kc-h2">Sponsor-Anfragen</h2>
+      <p className="kc-sub">
+        Wird automatisch gespeichert, sobald jemand im Sponsoring-Formular auf den WhatsApp-Button
+        tippt - unabhängig davon, ob die WhatsApp-Nachricht tatsächlich abgeschickt wurde.
+      </p>
+
+      {laedt ? (
+        <p className="kc-notiz">Lädt …</p>
+      ) : anfragen.length === 0 ? (
+        <p className="kc-notiz">Noch keine Sponsor-Anfragen eingegangen.</p>
+      ) : (
+        <div className="kc-anmeldungs-tabelle">
+          {anfragen.map((s) => (
+            <div className="kc-anmeldungs-zeile" key={s.id} style={s.bearbeitet ? { opacity: 0.6 } : undefined}>
+              <div>
+                <strong>{s.firma}</strong> · {s.ansprechpartner}
+                <div className="kc-notiz">{s.email}{s.telefon ? ` · ${s.telefon}` : ""}</div>
+                {s.budget && <div className="kc-notiz">Budget: {s.budget}</div>}
+                {s.nachricht && <div className="kc-notiz">„{s.nachricht}"</div>}
+                <div className="kc-notiz">Eingegangen: {formatDatumZeit(new Date(s.erstellt_am).getTime())}</div>
+                {s.bearbeitet && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>✓ Erledigt</div>}
+              </div>
+              <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                <a
+                  className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                  href={whatsappLink(s.telefon || "", `Hallo ${s.ansprechpartner}, vielen Dank für euer Interesse an einem Sponsoring bei ${VERANSTALTER.name}!`)}
+                  target="_blank"
+                  rel="noopener"
+                  style={!s.telefon ? { pointerEvents: "none", opacity: 0.5 } : undefined}
+                >
+                  📱 WhatsApp
+                </a>
+                <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => onMarkieren(s.id, !s.bearbeitet)}>
+                  {s.bearbeitet ? "Als offen markieren" : "Als erledigt markieren"}
+                </button>
+                <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => onLoeschen(s.id)}>Löschen</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="kc-admin-aktionen" style={{ marginTop: "14px" }}>
+        <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
+      </div>
+    </div>
+  );
+}
+
+function EinnahmenUebersicht({ turniere, anmeldungen, onSchliessen }) {
+  const zeilen = berechneEinnahmenProTurnier(turniere, anmeldungen)
+    .filter((z) => z.anzahlBestaetigt > 0)
+    .sort((a, b) => new Date(b.turnier.datum) - new Date(a.turnier.datum));
+  const gesamtEinnahmen = zeilen.reduce((sum, z) => sum + z.einnahmen, 0);
+  const gesamtKostenfrei = zeilen.reduce((sum, z) => sum + z.anzahlKostenfrei, 0);
+
+  return (
+    <div className="kc-section kc-formular-karte">
+      <h2 className="kc-h2">Einnahmenübersicht</h2>
+      <p className="kc-sub">
+        Nur bestätigte Anmeldungen zählen. Gebührenfreie Teams sind zwar bestätigt, tragen aber
+        nichts zu den Einnahmen bei.
+      </p>
+
+      {zeilen.length === 0 ? (
+        <p className="kc-notiz">Noch keine bestätigten Anmeldungen vorhanden.</p>
+      ) : (
+        <>
+          <div className="kc-anmeldungs-tabelle">
+            {zeilen.map((z) => (
+              <div className="kc-anmeldungs-zeile" key={z.turnier.id}>
+                <div>
+                  <strong>{z.turnier.name}</strong>
+                  <div className="kc-notiz">{formatDatum(z.turnier.datum)} · {z.anzahlBestaetigt} bestätigt, davon {z.anzahlKostenfrei} kostenfrei</div>
+                </div>
+                <div style={{ fontWeight: 700, fontSize: "15px" }}>{z.einnahmen.toFixed(2)} €</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="kc-einnahmen-gesamt">
+            <span>Gesamt ({gesamtKostenfrei} kostenfrei)</span>
+            <strong>{gesamtEinnahmen.toFixed(2)} €</strong>
+          </div>
+        </>
+      )}
+
+      <div className="kc-admin-aktionen" style={{ marginTop: "14px" }}>
+        <button
+          className="kc-btn kc-btn--primary"
+          onClick={() => einnahmenAlsPdfHerunterladen(turniere, anmeldungen)}
+          disabled={zeilen.length === 0}
+        >
+          📄 Als PDF herunterladen
+        </button>
+        <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
+      </div>
+    </div>
+  );
+}
+
 function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
   const [form, setForm] = useState(() =>
     bestehendesTurnier
       ? {
           name: bestehendesTurnier.name,
           datum: bestehendesTurnier.datum,
+          uhrzeit: bestehendesTurnier.uhrzeit || "",
           ort: bestehendesTurnier.ort,
           maxPlaetze: String(bestehendesTurnier.maxPlaetze),
           preis: String(bestehendesTurnier.preis),
           zahlLink: bestehendesTurnier.zahlLink || "",
+          beschreibung: bestehendesTurnier.beschreibung || "",
+          iban: bestehendesTurnier.iban || STANDARD_IBAN,
+          kontoinhaber: bestehendesTurnier.kontoinhaber || STANDARD_KONTOINHABER,
         }
-      : { name: "", datum: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "" }
+      : {
+          name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
+          iban: STANDARD_IBAN, kontoinhaber: STANDARD_KONTOINHABER,
+        }
   );
+  const [logoDatei, setLogoDatei] = useState(null);
+  const [logoVorschau, setLogoVorschau] = useState(null);
+  const [logoEntfernen, setLogoEntfernen] = useState(false);
+  const [zielgruppen, setZielgruppen] = useState(bestehendesTurnier?.zielgruppen || []);
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
   const gueltig = form.name.trim() && form.datum && form.ort.trim() && Number(form.maxPlaetze) > 0 && Number(form.preis) >= 0;
+
+  const zielgruppeUmschalten = (wert) => {
+    setZielgruppen((prev) => (prev.includes(wert) ? prev.filter((z) => z !== wert) : [...prev, wert]));
+  };
+
+  const logoAuswaehlen = (e) => {
+    const datei = e.target.files[0];
+    if (!datei) return;
+    setLogoDatei(datei);
+    setLogoEntfernen(false);
+    setLogoVorschau(URL.createObjectURL(datei));
+  };
 
   return (
     <div className="kc-section kc-formular-karte">
@@ -2622,7 +4501,7 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!gueltig) return;
-          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis) });
+          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis), logoDatei, logoEntfernen, zielgruppen });
         }}
       >
         <label className="kc-feld">
@@ -2635,9 +4514,29 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
             <input className="kc-input" type="date" value={form.datum} onChange={feld("datum")} required />
           </label>
           <label className="kc-feld">
-            <span>Ort</span>
-            <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
+            <span>Uhrzeit (optional)</span>
+            <input className="kc-input" type="time" value={form.uhrzeit} onChange={feld("uhrzeit")} />
           </label>
+        </div>
+        <label className="kc-feld">
+          <span>Ort</span>
+          <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
+        </label>
+        <div className="kc-feld">
+          <span>Für welche Jugend ist dieses Turnier? (optional, für den Jugend-Filter der Vereine)</span>
+          <div className="kc-zielgruppen-auswahl">
+            {JUGEND_GRUPPEN.map((g) => (
+              <label key={g.wert} className="kc-checkbox-chip">
+                <input
+                  type="checkbox"
+                  checked={zielgruppen.includes(g.wert)}
+                  onChange={() => zielgruppeUmschalten(g.wert)}
+                />
+                <span>{g.label}</span>
+              </label>
+            ))}
+          </div>
+          <p className="kc-notiz">Keine Auswahl = Turnier gilt für alle Jugenden und wird bei jedem Jugend-Filter angezeigt.</p>
         </div>
         <div className="kc-feld-reihe">
           <label className="kc-feld">
@@ -2652,6 +4551,45 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         <label className="kc-feld">
           <span>Zahlungslink (z. B. PayPal.me oder Stripe Payment Link)</span>
           <input className="kc-input" type="url" value={form.zahlLink} onChange={feld("zahlLink")} placeholder="https://" />
+        </label>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>IBAN für Überweisung (optional, alternative Zahlungsart)</span>
+            <input className="kc-input" value={form.iban} onChange={feld("iban")} placeholder="z. B. DE33 5002 4024 3247 4234 01" />
+          </label>
+          <label className="kc-feld">
+            <span>Kontoinhaber</span>
+            <input className="kc-input" value={form.kontoinhaber} onChange={feld("kontoinhaber")} />
+          </label>
+        </div>
+        <label className="kc-feld">
+          <span>Beschreibung (optional, für Vereine bei der Anmeldung sichtbar)</span>
+          <textarea
+            className="kc-input kc-textarea"
+            value={form.beschreibung}
+            onChange={feld("beschreibung")}
+            rows={4}
+            placeholder="z. B. Ablauf, Spielmodus, Hallenregeln, Verpflegung …"
+          />
+        </label>
+        <label className="kc-feld">
+          <span>Logo (optional, für Vereine bei der Anmeldung sichtbar)</span>
+          {(logoVorschau || (bestehendesTurnier?.logoPfad && !logoEntfernen)) && (
+            <div className="kc-logo-vorschau">
+              <img
+                src={logoVorschau || dateiOeffentlicheUrl(bestehendesTurnier.logoPfad)}
+                alt="Logo-Vorschau"
+              />
+              <button
+                type="button"
+                className="kc-btn kc-btn--gefahr kc-btn--klein"
+                onClick={() => { setLogoDatei(null); setLogoVorschau(null); setLogoEntfernen(true); }}
+              >
+                Logo entfernen
+              </button>
+            </div>
+          )}
+          <input className="kc-input" type="file" accept="image/*" onChange={logoAuswaehlen} />
         </label>
         <div className="kc-admin-aktionen">
           <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig}>
@@ -2729,6 +4667,16 @@ const CSS = `
 .kc-sub { color: var(--kc-muted); font-size: 15px; line-height: 1.5; margin: 0; }
 
 .kc-liste { display: flex; flex-direction: column; gap: 14px; }
+.kc-filter-leiste { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 4px; }
+.kc-filter-leiste .kc-feld { min-width: 140px; flex: 1; }
+.kc-filter-zuruecksetzen { flex-shrink: 0; }
+.kc-zielgruppen-auswahl { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.kc-checkbox-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: #F2F4F1; border: 1.5px solid #D7DED6; border-radius: 999px;
+  padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.kc-checkbox-chip input { margin: 0; }
 
 .kc-karte {
   background: var(--kc-card);
@@ -2738,6 +4686,11 @@ const CSS = `
   box-shadow: 0 1px 3px rgba(22,48,32,0.08);
 }
 .kc-karte__kopf { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.kc-karte__kopf-text { flex: 1; min-width: 0; }
+.kc-turnier-logo { width: 44px; height: 44px; object-fit: contain; border-radius: 8px; background: white; padding: 3px; flex-shrink: 0; border: 1px solid #E4E8E2; }
+.kc-turnier-logo--gross { width: 84px; height: 84px; display: block; margin-bottom: 10px; }
+.kc-turnier-beschreibung { font-size: 13.5px; line-height: 1.6; color: var(--kc-text); background: #F8FAF7; border-radius: 8px; padding: 10px 12px; margin: 10px 0; white-space: pre-wrap; }
+.kc-textarea { resize: vertical; font-family: inherit; }
 .kc-karte__titel { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 19px; font-weight: 700; margin: 0; color: var(--kc-pitch); }
 .kc-karte__zahl { text-align: right; flex-shrink: 0; }
 .kc-zahl-gross { display: block; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 26px; font-weight: 800; color: var(--kc-pitch); line-height: 1; }
@@ -2773,6 +4726,7 @@ const CSS = `
 .kc-formular { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 .kc-feld { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--kc-pitch); flex: 1; }
 .kc-feld-reihe { display: flex; gap: 14px; flex-wrap: wrap; }
+.kc-team-block { background: #F4F6F3; border-radius: 10px; padding: 14px 14px 2px; border-left: 3px solid var(--kc-green); display: flex; flex-direction: column; gap: 14px; }
 .kc-feld-reihe .kc-feld { min-width: 140px; }
 .kc-input {
   border: 1.5px solid #D7DED6;
@@ -2801,6 +4755,19 @@ const CSS = `
   margin: 4px 0 0;
 }
 
+.kc-bank-info {
+  background: #F2F4F1;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0 0;
+  font-size: 13.5px;
+}
+.kc-bank-info strong { display: block; margin-bottom: 6px; color: var(--kc-pitch); }
+.kc-bank-info__zeile { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px dashed #D7DED6; }
+.kc-bank-info__zeile:last-child { border-bottom: none; }
+.kc-bank-info__zeile span:first-child { color: var(--kc-muted); flex-shrink: 0; }
+.kc-bank-info__zeile span:last-child { font-weight: 600; text-align: right; }
+
 .kc-datenschutz { display: flex; flex-direction: column; gap: 8px; }
 .kc-checkbox-zeile { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; font-weight: 400; color: var(--kc-text); }
 .kc-checkbox-zeile input { margin-top: 3px; flex-shrink: 0; }
@@ -2812,6 +4779,21 @@ const CSS = `
 .kc-ds-hinweis-box { background: #FCF3DC; color: #7A5A00; padding: 8px 10px; border-radius: 6px; margin: 0 0 4px !important; }
 
 .kc-warteliste-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
+.kc-neu-block { background: #EEF4FB; border: 1.5px solid var(--kc-blue); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
+.kc-h3--neu { color: var(--kc-blue); margin-top: 0; }
+.kc-bereits-bearbeitet-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #D7DED6; display: flex; flex-direction: column; gap: 12px; opacity: 0.85; }
+.kc-status-zusammenfassung { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 0; }
+.kc-status-chip { display: inline-block; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; }
+.kc-status-chip--gruen { background: #E4F3EA; color: #1E6E3C; }
+.kc-status-chip--gelb { background: #FCF3DC; color: #7A5A00; }
+.kc-status-chip--blau { background: #E4ECF6; color: #1B3E6B; }
+.kc-status-chip--rot { background: #FBE9E7; color: #A6362B; }
+.kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
+.kc-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.kc-dialog { background: #fff; border-radius: 12px; padding: 20px; width: 100%; max-width: 440px; max-height: 90vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
+.kc-h3--bestaetigt { color: var(--kc-green); margin-top: 0; }
 
 .kc-btn--block { display: block; width: 100%; margin-top: 8px; }
 
@@ -2824,6 +4806,8 @@ const CSS = `
 
 .kc-spiele-liste { display: flex; flex-direction: column; gap: 8px; }
 .kc-spiel-zeile { display: flex; align-items: center; gap: 8px; font-size: 13.5px; background: #F8FAF7; border-radius: 7px; padding: 8px 10px; flex-wrap: wrap; }
+.kc-spiel-meta { flex-basis: 100%; font-size: 11.5px; color: var(--kc-muted); font-weight: 600; }
+.kc-spiel-zeit-bearbeiten { flex-basis: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .kc-spiel-zeile > span:first-child, .kc-spiel-zeile > span:nth-child(3) { flex: 1; min-width: 90px; }
 .kc-spiel-zeile--freilos { color: var(--kc-muted); font-style: italic; }
 .kc-spiel-ergebnis { font-weight: 700; min-width: 48px; text-align: center; }
@@ -2839,6 +4823,9 @@ const CSS = `
 .kc-link-zeile .kc-input { font-size: 12px; }
 
 .kc-dokumente-liste { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.kc-mannschaften-gruppe { margin-bottom: 18px; }
+.kc-mannschaften-liste { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.kc-mannschaften-liste li { background: var(--kc-card); border-radius: 8px; padding: 10px 14px; font-size: 14px; box-shadow: 0 1px 3px rgba(22,48,32,0.06); }
 .kc-dokument-zeile { display: flex; align-items: center; gap: 12px; background: var(--kc-card); border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(22,48,32,0.08); text-decoration: none; color: inherit; }
 .kc-dokument-icon { font-size: 22px; flex-shrink: 0; }
 .kc-dokument-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
@@ -2869,6 +4856,8 @@ const CSS = `
 .kc-admin-aktionen--klein { margin-top: 8px; }
 
 .kc-anmeldungs-tabelle { margin-top: 14px; border-top: 1px solid #E5EAE3; padding-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.kc-einnahmen-gesamt { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 12px 14px; background: var(--kc-pitch); color: white; border-radius: 8px; font-size: 15px; }
+.kc-einnahmen-gesamt strong { font-size: 19px; }
 .kc-anmeldungs-zeile { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; background: #F8FAF7; border-radius: 8px; font-size: 13.5px; }
 
 @media (max-width: 480px) {

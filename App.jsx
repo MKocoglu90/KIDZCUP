@@ -347,6 +347,17 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Ohne fristgerechte Zahlung wird der Platz erneut freigegeben.\n\n${gruss}`,
     };
   }
+  if (typ === "auf_warteliste_gesetzt") {
+    return {
+      betreff: `Eure Anmeldung steht jetzt auf der Warteliste – ${turnier?.name || "KIDZCUP"}`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `leider müssen wir die Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) nachträglich wieder auf die Warteliste setzen.\n\n` +
+        (anmeldung.warBezahlt ? `Eine bereits gezahlte Startgebühr erstatten wir euch bzw. verrechnen sie mit euch - wir melden uns dazu direkt bei euch.\n\n` : "") +
+        `Sobald wieder ein Platz frei wird, rückt ihr automatisch nach und erhaltet eine E-Mail.\n\n` +
+        `Bei Rückfragen meldet euch gerne kurz bei uns.\n\n${gruss}`,
+    };
+  }
   if (typ === "frist_verpasst_warteliste") {
     return {
       betreff: `Auf Warteliste – Zahlungsfrist verpasst (${turnier?.name || "KIDZCUP"})`,
@@ -3721,6 +3732,7 @@ const JUGEND_KATEGORIEN = [
   "C1", "C2", "C3", "C4", "C5",
   "B1", "B2", "B3", "B4", "B5",
   "A1", "A2", "A3", "A4", "A5",
+  "F-Juniorinnen", "E-Juniorinnen", "D-Juniorinnen", "C-Juniorinnen", "B-Juniorinnen",
 ];
 
 // Grobe Gruppen für die Zielgruppen-Auswahl pro Turnier und den Jugend-Filter in der Turnierliste
@@ -3734,6 +3746,11 @@ const JUGEND_GRUPPEN = [
   { wert: "C", label: "C-Jugend" },
   { wert: "B", label: "B-Jugend" },
   { wert: "A", label: "A-Jugend" },
+  { wert: "F-Juniorinnen", label: "F-Juniorinnen" },
+  { wert: "E-Juniorinnen", label: "E-Juniorinnen" },
+  { wert: "D-Juniorinnen", label: "D-Juniorinnen" },
+  { wert: "C-Juniorinnen", label: "C-Juniorinnen" },
+  { wert: "B-Juniorinnen", label: "B-Juniorinnen" },
 ];
 
 // Reine Mädchenturniere: Statt "Jugend" gilt der Begriff "Juniorinnen" (z. B. "E1-Juniorinnen").
@@ -3751,6 +3768,7 @@ function jugendLabel(jugend, maedchen) {
   return /^[A-G]\d?$/.test(jugend) ? `${jugend}-Juniorinnen` : jugend;
 }
 function gruppenLabel(gruppe, maedchen) {
+  if (/Juniorinnen$/.test(gruppe.wert)) return gruppe.label;
   return maedchen && gruppe.wert !== "Bambini" ? `${gruppe.wert}-Juniorinnen` : gruppe.label;
 }
 
@@ -5985,14 +6003,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         && x.jugend === a.jugend && effektiverStatus(x, jetzt) !== "abgelehnt");
       if (doppelt) { ergebnis.uebersprungen.push(`${a.verein} (${a.jugend}) ist im Zielturnier schon angemeldet`); continue; }
       const platzFrei = belegtZiel < ziel.maxPlaetze;
-      const neuerStatus = !platzFrei ? "warteliste" : modus === "annehmen" ? "ausstehend" : "eingegangen";
+      const warBestaetigt = effektiverStatus(a, jetzt) === "bestaetigt";
+      // Bestätigte Teams können ihren Status behalten (Startgebühr wird intern verrechnet)
+      const neuerStatus = !platzFrei ? "warteliste" : (warBestaetigt && modus === "behalten") ? "bestaetigt" : modus === "annehmen" ? "ausstehend" : "eingegangen";
       const frist = neuerStatus === "ausstehend" ? new Date(Date.now() + DREI_TAGE_MS).toISOString() : null;
+      const daten = { turnier_id: ziel.id, status: neuerStatus, frist, bearbeitet_von: adminProfil.name || "" };
+      if (warBestaetigt && neuerStatus !== "bestaetigt") daten.bestaetigt_am = null;
       try {
-        const zeile = await supabaseUpdate(
-          "anmeldungen", a.id,
-          { turnier_id: ziel.id, status: neuerStatus, frist, bearbeitet_von: adminProfil.name || "" },
-          session.access_token
-        );
+        const zeile = await supabaseUpdate("anmeldungen", a.id, daten, session.access_token);
         const aktualisiert = anmeldungAusDb(zeile[0]);
         setAnmeldungen((prev) => prev.map((x) => (x.id === a.id ? aktualisiert : x)));
         if (platzFrei) belegtZiel++;
@@ -6319,6 +6337,29 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     );
     if (grund === null) return; // Abgebrochen
     anmeldungAktualisieren(a.id, "abgelehnt", { ablehnungsgrund: grund.trim() || null });
+  };
+
+  // Setzt eine bereits bestätigte Mannschaft nachträglich wieder auf die Warteliste (Platz wird frei).
+  // Eine eventuell schon gezahlte Startgebühr wird intern zurücküberwiesen bzw. verrechnet - das passiert außerhalb der App.
+  const bestaetigteAufWartelisteSetzen = async (a) => {
+    const turnier = turniere.find((t) => t.id === a.turnierId);
+    const gebuehrHinweis = a.gebuehrenfrei
+      ? ""
+      : "\n\nWichtig: Eine bereits gezahlte Startgebühr wird intern zurücküberwiesen bzw. verrechnet – bitte notiere dir das (die App wickelt keine Zahlungen ab).";
+    if (!window.confirm(`„${a.verein}“ (${a.jugend}) wieder auf die Warteliste setzen?\n\nDer Platz wird frei, der Trainer wird per Mail informiert.${gebuehrHinweis}`)) return;
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", a.id,
+        { status: "warteliste", frist: null, bestaetigt_am: null, bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisiert = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((x) => (x.id === a.id ? aktualisiert : x)));
+      belegungNeuLaden();
+      benachrichtigen("auf_warteliste_gesetzt", { ...aktualisiert, warBezahlt: !a.gebuehrenfrei }, turnier);
+    } catch (e) {
+      alert("Mannschaft konnte nicht auf die Warteliste gesetzt werden: " + e.message);
+    }
   };
 
   const ausWartelisteAufnehmen = async (anmeldungId) => {
@@ -7535,6 +7576,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   {bestaetigteRegs.length > 0 && (
                     <div className="kc-bestaetigt-block">
                       <h3 className="kc-h3 kc-h3--bestaetigt">✅ Bestätigt ({bestaetigteRegs.length})</h3>
+                      <AnmeldungenUebertragen turnier={t} kandidaten={bestaetigteRegs} turniere={turniere} anmeldungen={anmeldungen} jetzt={jetzt} onUebertragen={anmeldungenUebertragen} bestaetigt />
                       {bestaetigteRegs.map((a) => (
                         <div className="kc-anmeldungs-zeile" key={a.id}>
                           <div>
@@ -7562,6 +7604,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             >
                               📱 WhatsApp
                             </a>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => bestaetigteAufWartelisteSetzen(a)} title="Platz wird frei, die Mannschaft steht wieder auf der Warteliste">⏳ Auf Warteliste</button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)} title="Für kurzfristige Absagen - Platz wird für die Warteliste frei">Ablehnen</button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
                               🗑 Daten löschen
@@ -7841,11 +7884,11 @@ function TurnierUebersicht({ turniere, anmeldungen, jetzt, onAnspringen }) {
 }
 
 // Überträgt Wartelisten-Mannschaften (oder beliebige ausgewählte) auf ein anderes Turnier.
-function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, jetzt, onUebertragen }) {
+function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, jetzt, onUebertragen, bestaetigt = false }) {
   const [offen, setOffen] = useState(false);
   const [auswahl, setAuswahl] = useState(() => new Set());
   const [zielId, setZielId] = useState("");
-  const [modus, setModus] = useState("neu");
+  const [modus, setModus] = useState(bestaetigt ? "behalten" : "neu");
   const [laeuft, setLaeuft] = useState(false);
   const [meldung, setMeldung] = useState("");
   const ziele = turniere
@@ -7859,7 +7902,7 @@ function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, je
   const senden = async () => {
     if (!zielTurnier || auswahl.size === 0 || laeuft) return;
     const namen = kandidaten.filter((a) => auswahl.has(a.id)).map((a) => a.verein).join(", ");
-    if (!window.confirm(`${auswahl.size} Mannschaft(en) auf „${zielTurnier.name}“ (${formatDatum(zielTurnier.datum)}) übertragen?\n\n${namen}\n\nDie Trainer werden per Mail informiert und müssen sich nicht neu anmelden.`)) return;
+    if (!window.confirm(`${auswahl.size} Mannschaft(en) auf „${zielTurnier.name}“ (${formatDatum(zielTurnier.datum)}) übertragen?\n\n${namen}\n\nDie Trainer werden per Mail informiert und müssen sich nicht neu anmelden.${bestaetigt && modus === "behalten" ? "\n\nDie Mannschaften bleiben bestätigt; die Startgebühr wird intern verrechnet bzw. zurücküberwiesen." : ""}`)) return;
     setLaeuft(true);
     setMeldung("");
     try {
@@ -7886,6 +7929,7 @@ function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, je
           <p className="kc-notiz">
             Die ausgewählten Mannschaften wechseln mit ihrem Anmeldecode auf das andere Turnier – sie müssen sich nicht neu anmelden
             und werden per Mail informiert. Ist dort kein Platz mehr frei, kommen sie auf die Warteliste des Zielturniers.
+            {bestaetigt && " Eine bereits gezahlte Startgebühr wird intern verrechnet bzw. zurücküberwiesen (außerhalb der App)."}
           </p>
           <label className="kc-checkbox-zeile">
             <input type="checkbox" checked={auswahl.size === kandidaten.length} onChange={(e) => setAuswahl(e.target.checked ? new Set(kandidaten.map((a) => a.id)) : new Set())} />
@@ -7912,12 +7956,18 @@ function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, je
           </label>
           <div className="kc-feld">
             <span>Status im Zielturnier (bei freien Plätzen)</span>
+            {bestaetigt && (
+              <label className="kc-checkbox-zeile">
+                <input type="radio" name={`uebertragen-modus-${turnier.id}-${bestaetigt ? "b" : "w"}`} checked={modus === "behalten"} onChange={() => setModus("behalten")} />
+                <span>Bestätigt bleiben – Startgebühr wird intern verrechnet</span>
+              </label>
+            )}
             <label className="kc-checkbox-zeile">
-              <input type="radio" name={`uebertragen-modus-${turnier.id}`} checked={modus === "neu"} onChange={() => setModus("neu")} />
+              <input type="radio" name={`uebertragen-modus-${turnier.id}-${bestaetigt ? "b" : "w"}`} checked={modus === "neu"} onChange={() => setModus("neu")} />
               <span>Als „neu eingegangen“ – ich prüfe und nehme selbst an</span>
             </label>
             <label className="kc-checkbox-zeile">
-              <input type="radio" name={`uebertragen-modus-${turnier.id}`} checked={modus === "annehmen"} onChange={() => setModus("annehmen")} />
+              <input type="radio" name={`uebertragen-modus-${turnier.id}-${bestaetigt ? "b" : "w"}`} checked={modus === "annehmen"} onChange={() => setModus("annehmen")} />
               <span>Direkt annehmen – 3 Tage Zahlungsfrist startet, Zahlungs-Mail geht mit raus</span>
             </label>
           </div>

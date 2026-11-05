@@ -385,6 +385,54 @@ async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
   }
 }
 
+// Eingangsbestätigung an den Trainer direkt nach der Anmeldung (eine Mail für alle Teams der Anmeldung).
+// Bewusst ohne mailto-Fallback: Öffentliche Besucher sollen kein Mail-Programm aufgehen sehen.
+// Schlägt der Versand fehl, bleibt die Anmeldung gültig - der Trainer sieht Code und Status ja auf dem Bildschirm.
+async function eingangsbestaetigungSenden(erstellteAnmeldungen, turnier) {
+  if (!E_MAIL_WEBHOOK_URL || !erstellteAnmeldungen || erstellteAnmeldungen.length === 0) return false;
+  const [erste, ...weitere] = erstellteAnmeldungen;
+  if (!erste.email) return false;
+  try {
+    const res = await fetch(E_MAIL_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(E_MAIL_WEBHOOK_SECRET ? { "X-Webhook-Secret": E_MAIL_WEBHOOK_SECRET } : {}),
+      },
+      body: JSON.stringify({ ereignis: "eingang_bestaetigung", anmeldung: erste, weitere, turnier }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn("Eingangsbestätigung konnte nicht verschickt werden:", e);
+    return false;
+  }
+}
+
+// Info-Mail an den Trainer, wenn die Anmeldung auf ein anderes Turnier übertragen wurde (nur über den Mail-Server,
+// bewusst ohne mailto-Fallback, weil bei mehreren Teams sonst viele Mailfenster aufgehen würden).
+async function uebertragungsMailSenden(anmeldung, neuesTurnier, altesTurnier) {
+  if (!E_MAIL_WEBHOOK_URL || !anmeldung.email) return false;
+  try {
+    const res = await fetch(E_MAIL_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(E_MAIL_WEBHOOK_SECRET ? { "X-Webhook-Secret": E_MAIL_WEBHOOK_SECRET } : {}),
+      },
+      body: JSON.stringify({
+        ereignis: "uebertragen",
+        anmeldung,
+        turnier: neuesTurnier,
+        vonTurnier: altesTurnier ? { name: altesTurnier.name, datum: altesTurnier.datum, ort: altesTurnier.ort } : null,
+      }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn("Übertragungs-Mail konnte nicht verschickt werden:", e);
+    return false;
+  }
+}
+
 // Verschickt die WhatsApp-Gruppen-Einladung an EINE Mannschaft über den Mail-Server.
 // Anders als benachrichtigen() gibt es hier bewusst keinen mailto-Fallback (sonst würden sich bei
 // vielen Teams dutzende Mailfenster öffnen) - stattdessen wird genau zurückgemeldet, was passiert ist.
@@ -1286,12 +1334,18 @@ function zeitenNeuVerteilen(plan, optionen) {
     x.uhrzeit = addMinuten(startzeit, z.slot * spieldauerMin);
     x.feld = z.feld;
   });
-  const geaendert = offene.some((s) => {
-    const alt = plan.spiele.find((x) => x.id === s.id);
-    return !alt || alt.uhrzeit !== s.uhrzeit || alt.feld !== s.feld;
-  });
   neu.spiele.forEach((x) => { if (x.uhrzeit) x.dauerMin = spieldauerMin; });
-  const rahmenNeu = planZeitrahmen(neu);
+  let rahmenNeu = planZeitrahmen(neu);
+  // Sicherheitsnetz: wird das Ende durch die neue Verteilung später als im gültigen alten Stand, bleibt der alte Stand
+  if (altGueltig && rahmenAlt && rahmenNeu && rahmenNeu.endeRel > rahmenAlt.endeRel) {
+    offene.forEach((x) => { const z = alt[x.id]; x.uhrzeit = addMinuten(startzeit, z.slot * spieldauerMin); x.feld = z.feld; });
+    neu.spiele.forEach((x) => { if (x.uhrzeit) x.dauerMin = spieldauerMin; });
+    rahmenNeu = planZeitrahmen(neu);
+  }
+  const geaendert = offene.some((s) => {
+    const vorher = plan.spiele.find((x) => x.id === s.id);
+    return !vorher || vorher.uhrzeit !== s.uhrzeit || vorher.feld !== s.feld;
+  });
   const endeAlt = rahmenAlt ? rahmenAlt.endzeit : null;
   const endeNeu = rahmenNeu ? rahmenNeu.endzeit : null;
   const spaeterMin = rahmenAlt && rahmenNeu ? Math.max(0, rahmenNeu.endeRel - rahmenAlt.endeRel) : 0;
@@ -3118,7 +3172,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
     return turniereImAusrichter.filter((t) => {
       if (monatFilter !== "" && new Date(t.datum).getMonth() !== Number(monatFilter)) return false;
       // Turniere ohne hinterlegte Zielgruppe gelten als "für alle Jugenden" und werden nie ausgeblendet.
-      if (jugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(jugendFilter)) return false;
+      if (jugendFilter !== "" && zielgruppenOhneMaedchen(t).length > 0 && !zielgruppenOhneMaedchen(t).includes(jugendFilter)) return false;
       return true;
     });
   }, [turniereImAusrichter, monatFilter, jugendFilter]);
@@ -3155,6 +3209,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         if (!aufWarteliste) bereitsBelegt++;
         benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
       }
+      eingangsbestaetigungSenden(erstellteAnmeldungen, turnier); // Mail an den Trainer, im Hintergrund
       if (erstellteAnmeldungen.length === 1) {
         setNeueAnmeldung(erstellteAnmeldungen[0]);
       } else {
@@ -3476,6 +3531,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
                 <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
                 <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
+                {istMaedchenTurnier(t) && <div><dt>Für</dt><dd>Juniorinnen (reines Mädchenturnier)</dd></div>}
               </dl>
               {t.beschreibung && <p className="kc-turnier-beschreibung">{t.beschreibung}</p>}
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
@@ -3627,10 +3683,10 @@ function TeilnahmebedingungenText() {
 // Übliche Jugend-/Altersklassen im deutschen Amateurfußball, inkl. gängiger 1er-/2er-Unterteilung.
 const JUGEND_KATEGORIEN = [
   "Bambini",
-  "G1", "G2", "G3", "G4", "G5",
-  "F1", "F2", "F3", "F4", "F5",
-  "E1", "E2", "E3", "E4", "E5",
-  "D1", "D2", "D3", "D4", "D5",
+  "G1", "G2", "G3", "G4", "G5", "G6",
+  "F1", "F2", "F3", "F4", "F5", "F6",
+  "E1", "E2", "E3", "E4", "E5", "E6",
+  "D1", "D2", "D3", "D4", "D5", "D6",
   "C1", "C2", "C3", "C4", "C5",
   "B1", "B2", "B3", "B4", "B5",
   "A1", "A2", "A3", "A4", "A5",
@@ -3648,6 +3704,24 @@ const JUGEND_GRUPPEN = [
   { wert: "B", label: "B-Jugend" },
   { wert: "A", label: "A-Jugend" },
 ];
+
+// Reine Mädchenturniere: Statt "Jugend" gilt der Begriff "Juniorinnen" (z. B. "E1-Juniorinnen").
+// Gespeichert wird das als zusätzlicher Wert "Juniorinnen" in den Zielgruppen des Turniers (keine neue Datenbank-Spalte nötig);
+// die Jugend-Werte der Anmeldungen (z. B. "E1") bleiben unverändert, nur die Anzeige ändert sich.
+const JUNIORINNEN = "Juniorinnen";
+function istMaedchenTurnier(t) {
+  return !!t && Array.isArray(t.zielgruppen) && t.zielgruppen.includes(JUNIORINNEN);
+}
+function zielgruppenOhneMaedchen(t) {
+  return ((t && t.zielgruppen) || []).filter((z) => z !== JUNIORINNEN);
+}
+function jugendLabel(jugend, maedchen) {
+  if (!maedchen || !jugend) return jugend;
+  return /^[A-G]\d?$/.test(jugend) ? `${jugend}-Juniorinnen` : jugend;
+}
+function gruppenLabel(gruppe, maedchen) {
+  return maedchen && gruppe.wert !== "Bambini" ? `${gruppe.wert}-Juniorinnen` : gruppe.label;
+}
 
 const MONATSNAMEN = [
   "Januar", "Februar", "März", "April", "Mai", "Juni",
@@ -3764,11 +3838,11 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
                 <input className="kc-input" type="number" min="2005" max="2026" placeholder="z. B. 2016" value={team.jahrgang} onChange={teamFeld(i, "jahrgang")} required />
               </label>
               <label className="kc-feld">
-                <span>Jugend</span>
+                <span>{istMaedchenTurnier(turnier) ? "Juniorinnen" : "Jugend"}</span>
                 <select className="kc-input" value={team.jugend} onChange={teamFeld(i, "jugend")} required>
                   <option value="" disabled>Bitte wählen…</option>
                   {JUGEND_KATEGORIEN.map((k) => (
-                    <option key={k} value={k}>{k}</option>
+                    <option key={k} value={k}>{jugendLabel(k, istMaedchenTurnier(turnier))}</option>
                   ))}
                 </select>
               </label>
@@ -3905,7 +3979,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           <div><dt>Verein</dt><dd>{anmeldung.verein}</dd></div>
           <div><dt>Trainer</dt><dd>{anmeldung.trainer}</dd></div>
           <div><dt>Jahrgang</dt><dd>{anmeldung.jahrgang}</dd></div>
-          <div><dt>Jugend</dt><dd>{anmeldung.jugend}</dd></div>
+          <div><dt>{istMaedchenTurnier(turnier) ? "Juniorinnen" : "Jugend"}</dt><dd>{jugendLabel(anmeldung.jugend, istMaedchenTurnier(turnier))}</dd></div>
           {anmeldung.notfallkontakt && <div><dt>Notfallkontakt</dt><dd>{anmeldung.notfallkontakt}</dd></div>}
           <div><dt>Angemeldet am</dt><dd>{formatDatumZeit(anmeldung.angemeldetAm)}</dd></div>
           {anmeldung.frist && <div><dt>Zahlungsfrist</dt><dd>{formatDatumZeit(anmeldung.frist)}</dd></div>}
@@ -5861,6 +5935,61 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     ).length;
   };
 
+  // Überträgt Mannschaften (z. B. von der Warteliste) auf ein anderes Turnier, ohne dass sie sich neu anmelden müssen.
+  // Der Anmeldecode bleibt gleich. Ist im Zielturnier Platz, werden sie dort als "neu eingegangen" geführt
+  // (oder auf Wunsch direkt angenommen, mit 3 Tagen Zahlungsfrist), sonst landen sie auf dessen Warteliste.
+  // Gibt eine Zusammenfassung zurück; der Trainer wird per Mail informiert.
+  const anmeldungenUebertragen = async (ids, zielId, modus) => {
+    const ziel = turniere.find((t) => t.id === zielId);
+    const ergebnis = { uebertragen: 0, ohneMail: [], uebersprungen: [], fehler: [] };
+    if (!ziel) { ergebnis.fehler.push("Zielturnier nicht gefunden."); return ergebnis; }
+    const reserviert = ["eingegangen", "ausstehend", "zahlung_gemeldet", "bestaetigt"];
+    let belegtZiel = anmeldungen.filter((a) => a.turnierId === ziel.id && reserviert.includes(effektiverStatus(a, jetzt))).length;
+    for (const id of ids) {
+      const a = anmeldungen.find((x) => x.id === id);
+      if (!a) continue;
+      const altesTurnier = turniere.find((t) => t.id === a.turnierId);
+      const doppelt = anmeldungen.some((x) =>
+        x.id !== a.id && x.turnierId === ziel.id && (x.verein || "").trim().toLowerCase() === (a.verein || "").trim().toLowerCase()
+        && x.jugend === a.jugend && effektiverStatus(x, jetzt) !== "abgelehnt");
+      if (doppelt) { ergebnis.uebersprungen.push(`${a.verein} (${a.jugend}) ist im Zielturnier schon angemeldet`); continue; }
+      const platzFrei = belegtZiel < ziel.maxPlaetze;
+      const neuerStatus = !platzFrei ? "warteliste" : modus === "annehmen" ? "ausstehend" : "eingegangen";
+      const frist = neuerStatus === "ausstehend" ? new Date(Date.now() + DREI_TAGE_MS).toISOString() : null;
+      try {
+        const zeile = await supabaseUpdate(
+          "anmeldungen", a.id,
+          { turnier_id: ziel.id, status: neuerStatus, frist, bearbeitet_von: adminProfil.name || "" },
+          session.access_token
+        );
+        const aktualisiert = anmeldungAusDb(zeile[0]);
+        setAnmeldungen((prev) => prev.map((x) => (x.id === a.id ? aktualisiert : x)));
+        if (platzFrei) belegtZiel++;
+        ergebnis.uebertragen++;
+        const gesendet = await uebertragungsMailSenden(aktualisiert, ziel, altesTurnier);
+        if (!gesendet) ergebnis.ohneMail.push(a.verein);
+      } catch (e) {
+        ergebnis.fehler.push(`${a.verein}: ${e.message}`);
+      }
+    }
+    belegungNeuLaden();
+    return ergebnis;
+  };
+
+  // Aus der Übersicht: Turnier öffnen (Filter zurücksetzen, Archiv aufklappen falls nötig) und dorthin scrollen.
+  const turnierAnspringen = (t) => {
+    setAdminSuche("");
+    setAdminMonatFilter("");
+    setAdminJugendFilter("");
+    setAdminAusrichterFilter("");
+    if (turnierIstVorbei(t, jetzt)) setArchivOffen(true);
+    setOffeneTurniere((prev) => new Set(prev).add(t.id));
+    setTimeout(() => {
+      const el = document.getElementById(`turnier-karte-${t.id}`);
+      if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 200);
+  };
+
   const abmelden = async () => {
     await supabaseAbmelden(session.access_token);
     sitzungLoeschen();
@@ -6876,7 +7005,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const verfuegbareMonate = Array.from(new Set(sortiert.map((t) => new Date(t.datum).getMonth()))).sort((a, b) => a - b);
           const gefiltert = sortiert.filter((t) => {
             if (adminMonatFilter !== "" && new Date(t.datum).getMonth() !== Number(adminMonatFilter)) return false;
-            if (adminJugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(adminJugendFilter)) return false;
+            if (adminJugendFilter !== "" && zielgruppenOhneMaedchen(t).length > 0 && !zielgruppenOhneMaedchen(t).includes(adminJugendFilter)) return false;
             if (adminSuche.trim() !== "" && !t.name.toLowerCase().includes(adminSuche.trim().toLowerCase())) return false;
             if (adminAusrichterFilter !== "" && ausrichterName(t).toLowerCase() !== adminAusrichterFilter) return false;
             return true;
@@ -6885,6 +7014,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const filterAktiv = adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "" || adminAusrichterFilter !== "";
           return (
             <>
+              <TurnierUebersicht turniere={turniere} anmeldungen={anmeldungen} jetzt={jetzt} onAnspringen={turnierAnspringen} />
               <div className="kc-filter-leiste kc-filter-leiste--kompakt">
                 <label className="kc-feld kc-feld--suche">
                   <span>Turnier suchen</span>
@@ -6986,8 +7116,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offeneTurniere.has(t.id);
+          const maedchenT = istMaedchenTurnier(t);
           return (
-            <div className="kc-karte" key={t.id} style={{ borderLeftColor: t.veroeffentlicht === false ? "var(--kc-gold)" : "var(--kc-blue)" }}>
+            <div className="kc-karte" key={t.id} id={`turnier-karte-${t.id}`} style={{ borderLeftColor: t.veroeffentlicht === false ? "var(--kc-gold)" : "var(--kc-blue)" }}>
               <div className="kc-karte__kopf">
                 <h2 className="kc-karte__titel">
                   {t.name}
@@ -7031,6 +7162,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 {t.ausrichter && <div><dt>Ausrichter</dt><dd>{t.ausrichter}</dd></div>}
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
                 <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
+                {istMaedchenTurnier(t) && <div><dt>Für</dt><dd>Juniorinnen</dd></div>}
                 <div><dt>Zahlungslink</dt><dd className="kc-link-truncate">{t.zahlLink || "– nicht hinterlegt –"}</dd></div>
               </dl>
               <div className="kc-admin-aktionen">
@@ -7221,7 +7353,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         {[...bestaetigteRegs].sort((x, y) => (x.verein || "").localeCompare(y.verein || "")).map((a) => (
                           <li key={a.id} className="kc-quittungen-zeile">
                             <span>
-                              <strong>{a.verein}</strong> · {a.jugend}
+                              <strong>{a.verein}</strong> · {jugendLabel(a.jugend, maedchenT)}
                               <span className="kc-notiz"> · {a.gebuehrenfrei ? "gebührenfrei" : `${Number(t.preis).toFixed(2)} € bezahlt`}{a.bestaetigtAm ? ` · bestätigt ${formatDatum(a.bestaetigtAm)}` : ""}</span>
                             </span>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => zahlungsBelegHerunterladen(a, t)}>
@@ -7286,7 +7418,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     return (
                       <div className="kc-anmeldungs-zeile" key={a.id}>
                         <div>
-                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({jugendLabel(a.jugend, maedchenT)}) · Trainer: {a.trainer}
                           <div className="kc-notiz">{a.email} · {a.telefon}</div>
                           {(a.spielstaerke || a.jahrgangTyp) && (
                             <div className="kc-notiz">
@@ -7375,7 +7507,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                       {bestaetigteRegs.map((a) => (
                         <div className="kc-anmeldungs-zeile" key={a.id}>
                           <div>
-                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({jugendLabel(a.jugend, maedchenT)}) · Trainer: {a.trainer}
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
                             {(a.spielstaerke || a.jahrgangTyp) && (
                               <div className="kc-notiz">
@@ -7417,7 +7549,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     return (
                       <div className="kc-anmeldungs-zeile" key={a.id}>
                         <div>
-                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({jugendLabel(a.jugend, maedchenT)}) · Trainer: {a.trainer}
                           <div className="kc-notiz">{a.email} · {a.telefon}</div>
                           {(a.spielstaerke || a.jahrgangTyp) && (
                             <div className="kc-notiz">
@@ -7495,10 +7627,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   {wartelisteRegs.length > 0 && (
                     <div className="kc-warteliste-block">
                       <h3 className="kc-h3">Warteliste ({wartelisteRegs.length})</h3>
+                      <AnmeldungenUebertragen turnier={t} kandidaten={wartelisteRegs} turniere={turniere} anmeldungen={anmeldungen} jetzt={jetzt} onUebertragen={anmeldungenUebertragen} />
                       {wartelisteRegs.map((a) => (
                         <div className="kc-anmeldungs-zeile" key={a.id}>
                           <div>
-                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({jugendLabel(a.jugend, maedchenT)}) · Trainer: {a.trainer}
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
                             <div className="kc-notiz">Angemeldet: {formatDatumZeit(a.angemeldetAm)}</div>
                           </div>
@@ -7535,7 +7668,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                       {abgelehnteRegs.map((a) => (
                         <div className="kc-anmeldungs-zeile" key={a.id}>
                           <div>
-                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({jugendLabel(a.jugend, maedchenT)}) · Trainer: {a.trainer}
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
                             <div className="kc-notiz">Angemeldet: {formatDatumZeit(a.angemeldetAm)}</div>
                             {a.bearbeitetVon && <div className="kc-notiz">Abgelehnt von: {a.bearbeitetVon}</div>}
@@ -7611,6 +7744,158 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           );
         })()}
       </div>
+    </div>
+  );
+}
+
+// Schnellübersicht ganz oben im Admin-Bereich: alle Turniere in einer kompakten Liste mit den Anmeldungs-Zahlen.
+// Ein Klick auf eine Zeile öffnet das Turnier (auch im Archiv) und scrollt direkt dorthin.
+function TurnierUebersicht({ turniere, anmeldungen, jetzt, onAnspringen }) {
+  const [offen, setOffen] = useState(true);
+  const [archivZeigen, setArchivZeigen] = useState(false);
+  const zeilen = [...turniere]
+    .sort((a, b) => new Date(a.datum) - new Date(b.datum))
+    .map((t) => {
+      const regs = anmeldungen.filter((a) => a.turnierId === t.id);
+      const zaehle = (f) => regs.filter((a) => f(effektiverStatus(a, jetzt))).length;
+      return {
+        t,
+        neu: zaehle((st) => st === "eingegangen"),
+        offen: zaehle((st) => st === "ausstehend" || st === "zahlung_gemeldet"),
+        bestaetigt: zaehle((st) => st === "bestaetigt"),
+        warteliste: zaehle((st) => st === "warteliste"),
+        vorbei: turnierIstVorbei(t, jetzt),
+      };
+    });
+  const kommend = zeilen.filter((z) => !z.vorbei);
+  const vergangen = zeilen.filter((z) => z.vorbei).reverse();
+  const neuGesamt = kommend.reduce((summe, z) => summe + z.neu, 0);
+  const zeileRendern = (z) => (
+    <button type="button" key={z.t.id} className={`kc-ueberblick__zeile${z.vorbei ? " kc-ueberblick__zeile--vorbei" : ""}`} onClick={() => onAnspringen(z.t)}>
+      <span className="kc-ueberblick__name">
+        <strong>{z.t.name}</strong>
+        <span className="kc-notiz">{formatDatum(z.t.datum)}{z.t.ausrichter ? ` · ${z.t.ausrichter}` : ""}{z.t.veroeffentlicht === false ? " · Entwurf" : ""}</span>
+      </span>
+      <span className="kc-ueberblick__chips">
+        {z.neu > 0 && <span className="kc-status-chip kc-status-chip--blau">🆕 {z.neu} neu</span>}
+        {z.offen > 0 && <span className="kc-status-chip kc-status-chip--gelb">⏳ {z.offen}</span>}
+        <span className="kc-status-chip kc-status-chip--gruen">✅ {z.bestaetigt}/{z.t.maxPlaetze}</span>
+        {z.warteliste > 0 && <span className="kc-status-chip kc-status-chip--rot">Warteliste {z.warteliste}</span>}
+      </span>
+      <span className="kc-ueberblick__pfeil" aria-hidden="true">›</span>
+    </button>
+  );
+  return (
+    <section className="kc-ueberblick">
+      <button type="button" className="kc-ueberblick__kopf" onClick={() => setOffen((v) => !v)} aria-expanded={offen}>
+        <span>📋 Übersicht aller Turniere ({turniere.length}){neuGesamt > 0 ? ` · 🆕 ${neuGesamt} neue Anmeldung${neuGesamt !== 1 ? "en" : ""}` : ""}</span>
+        <span aria-hidden="true">{offen ? "▾" : "▸"}</span>
+      </button>
+      {offen && (
+        <div className="kc-ueberblick__liste">
+          {kommend.length === 0 && <p className="kc-notiz">Keine aktuellen oder kommenden Turniere.</p>}
+          {kommend.map(zeileRendern)}
+          {vergangen.length > 0 && (
+            <>
+              <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setArchivZeigen((v) => !v)}>
+                {archivZeigen ? "▾" : "▸"} Vergangene Turniere ({vergangen.length})
+              </button>
+              {archivZeigen && vergangen.map(zeileRendern)}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Überträgt Wartelisten-Mannschaften (oder beliebige ausgewählte) auf ein anderes Turnier.
+function AnmeldungenUebertragen({ turnier, kandidaten, turniere, anmeldungen, jetzt, onUebertragen }) {
+  const [offen, setOffen] = useState(false);
+  const [auswahl, setAuswahl] = useState(() => new Set());
+  const [zielId, setZielId] = useState("");
+  const [modus, setModus] = useState("neu");
+  const [laeuft, setLaeuft] = useState(false);
+  const [meldung, setMeldung] = useState("");
+  const ziele = turniere
+    .filter((t) => t.id !== turnier.id && !turnierIstVorbei(t, jetzt))
+    .sort((a, b) => new Date(a.datum) - new Date(b.datum));
+  const belegt = (t) => anmeldungen.filter((a) => a.turnierId === t.id && ["eingegangen", "ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))).length;
+  const umschalten = (id) => setAuswahl((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const zielTurnier = ziele.find((t) => t.id === zielId);
+  const maedchen = istMaedchenTurnier(turnier);
+
+  const senden = async () => {
+    if (!zielTurnier || auswahl.size === 0 || laeuft) return;
+    const namen = kandidaten.filter((a) => auswahl.has(a.id)).map((a) => a.verein).join(", ");
+    if (!window.confirm(`${auswahl.size} Mannschaft(en) auf „${zielTurnier.name}“ (${formatDatum(zielTurnier.datum)}) übertragen?\n\n${namen}\n\nDie Trainer werden per Mail informiert und müssen sich nicht neu anmelden.`)) return;
+    setLaeuft(true);
+    setMeldung("");
+    try {
+      const r = await onUebertragen([...auswahl], zielTurnier.id, modus);
+      const teile = [`✓ ${r.uebertragen} Mannschaft(en) übertragen.`];
+      if (r.uebersprungen.length) teile.push(`Übersprungen: ${r.uebersprungen.join("; ")}.`);
+      if (r.ohneMail.length) teile.push(`Keine Info-Mail verschickt an: ${r.ohneMail.join(", ")} – bitte direkt informieren (z. B. per WhatsApp).`);
+      if (r.fehler.length) teile.push(`Fehler: ${r.fehler.join("; ")}`);
+      setMeldung(teile.join(" "));
+      setAuswahl(new Set());
+    } finally {
+      setLaeuft(false);
+    }
+  };
+
+  if (kandidaten.length === 0) return null;
+  return (
+    <div className="kc-uebertragen">
+      <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setOffen((v) => !v)} aria-expanded={offen}>
+        ↪ Auf anderes Turnier übertragen {offen ? "▴" : "▾"}
+      </button>
+      {offen && (
+        <div className="kc-uebertragen__panel">
+          <p className="kc-notiz">
+            Die ausgewählten Mannschaften wechseln mit ihrem Anmeldecode auf das andere Turnier – sie müssen sich nicht neu anmelden
+            und werden per Mail informiert. Ist dort kein Platz mehr frei, kommen sie auf die Warteliste des Zielturniers.
+          </p>
+          <label className="kc-checkbox-zeile">
+            <input type="checkbox" checked={auswahl.size === kandidaten.length} onChange={(e) => setAuswahl(e.target.checked ? new Set(kandidaten.map((a) => a.id)) : new Set())} />
+            <span><strong>Alle auswählen ({kandidaten.length})</strong></span>
+          </label>
+          <div className="kc-uebertragen__liste">
+            {kandidaten.map((a) => (
+              <label key={a.id} className="kc-checkbox-zeile">
+                <input type="checkbox" checked={auswahl.has(a.id)} onChange={() => umschalten(a.id)} />
+                <span>{a.verein} · {jugendLabel(a.jugend, maedchen)} · Jg. {a.jahrgang} · {a.trainer}</span>
+              </label>
+            ))}
+          </div>
+          <label className="kc-feld">
+            <span>Zielturnier</span>
+            <select className="kc-input" value={zielId} onChange={(e) => setZielId(e.target.value)}>
+              <option value="">Bitte wählen…</option>
+              {ziele.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name} · {formatDatum(t.datum)}{t.ausrichter ? ` · ${t.ausrichter}` : ""} ({belegt(t)}/{t.maxPlaetze} belegt)
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="kc-feld">
+            <span>Status im Zielturnier (bei freien Plätzen)</span>
+            <label className="kc-checkbox-zeile">
+              <input type="radio" name={`uebertragen-modus-${turnier.id}`} checked={modus === "neu"} onChange={() => setModus("neu")} />
+              <span>Als „neu eingegangen“ – ich prüfe und nehme selbst an</span>
+            </label>
+            <label className="kc-checkbox-zeile">
+              <input type="radio" name={`uebertragen-modus-${turnier.id}`} checked={modus === "annehmen"} onChange={() => setModus("annehmen")} />
+              <span>Direkt annehmen – 3 Tage Zahlungsfrist startet, Zahlungs-Mail geht mit raus</span>
+            </label>
+          </div>
+          <button type="button" className="kc-btn kc-btn--primary kc-btn--klein" disabled={!zielTurnier || auswahl.size === 0 || laeuft} onClick={senden}>
+            {laeuft ? "Überträgt …" : `${auswahl.size} Mannschaft(en) übertragen`}
+          </button>
+          {meldung && <p className="kc-hinweis kc-hinweis--erfolg" style={{ marginTop: 8 }}>{meldung}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -8941,10 +9226,14 @@ function TurnierFormular({ bestehendesTurnier, vorlage, ausrichterVorschlaege = 
                   checked={zielgruppen.includes(g.wert)}
                   onChange={() => zielgruppeUmschalten(g.wert)}
                 />
-                <span>{g.label}</span>
+                <span>{gruppenLabel(g, zielgruppen.includes(JUNIORINNEN))}</span>
               </label>
             ))}
           </div>
+          <label className="kc-checkbox-zeile" style={{ marginTop: 8 }}>
+            <input type="checkbox" checked={zielgruppen.includes(JUNIORINNEN)} onChange={() => zielgruppeUmschalten(JUNIORINNEN)} />
+            <span><strong>Reines Mädchenturnier</strong> – überall „Juniorinnen“ statt „Jugend“ anzeigen (z. B. E1-Juniorinnen)</span>
+          </label>
           <p className="kc-notiz">Keine Auswahl = Turnier gilt für alle Jugenden und wird bei jedem Jugend-Filter angezeigt.</p>
         </div>
         <div className="kc-feld-reihe">
@@ -9243,6 +9532,19 @@ const CSS = `
 .kc-ausrichter-block { margin-top: 18px; }
 .kc-ausrichter-kopf { font-size: 17px; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--kc-blue); color: var(--kc-text); }
 .kc-gruppieren-schalter { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+[id^="turnier-karte-"] { scroll-margin-top: 90px; }
+.kc-ueberblick { background: var(--kc-card); border: 1.5px solid #D8DEE2; border-radius: 12px; margin: 0 0 14px; overflow: hidden; }
+.kc-ueberblick__kopf { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; background: #F4F6F7; border: 0; font: inherit; font-weight: 700; color: var(--kc-text); cursor: pointer; text-align: left; }
+.kc-ueberblick__liste { display: flex; flex-direction: column; gap: 6px; padding: 10px; max-height: 420px; overflow-y: auto; }
+.kc-ueberblick__zeile { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; padding: 9px 12px; background: #fff; border: 1px solid #E1E6E9; border-left: 4px solid var(--kc-blue); border-radius: 8px; font: inherit; color: var(--kc-text); cursor: pointer; text-align: left; }
+.kc-ueberblick__zeile:hover, .kc-ueberblick__zeile:focus-visible { background: #F4F8FC; outline: none; }
+.kc-ueberblick__zeile--vorbei { border-left-color: #B8C0C6; opacity: 0.8; }
+.kc-ueberblick__name { display: flex; flex-direction: column; flex: 1 1 220px; min-width: 0; }
+.kc-ueberblick__chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.kc-ueberblick__pfeil { font-size: 20px; color: var(--kc-blue); }
+.kc-uebertragen { margin: 4px 0 12px; }
+.kc-uebertragen__panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
+.kc-uebertragen__liste { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; padding: 4px 0; }
 .kc-quittungen-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-quittungen-liste { list-style: none; margin: 8px 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .kc-quittungen-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border: 1px solid #E1E6E9; border-radius: 8px; padding: 8px 10px; }

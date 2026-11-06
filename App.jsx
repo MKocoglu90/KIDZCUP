@@ -3497,7 +3497,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
                 <span className="kc-ausrichter-kachel__text">
                   <strong>{g.name}</strong>
                   <span>{g.turniere.length} Turnier{g.turniere.length !== 1 ? "e" : ""} · nächstes am {formatDatum(g.naechstes)}</span>
-                  <span>{frei > 0 ? `${frei} Plätze frei` : "aktuell ausgebucht – Warteliste möglich"}</span>
+                  <span className={`kc-ampel-pille kc-ampel-pille--${frei === 0 ? "voll" : frei <= 3 ? "knapp" : "frei"}`}>{frei > 0 ? `${frei} Plätze frei` : "Ausgebucht – Warteliste möglich"}</span>
                 </span>
                 <span className="kc-ausrichter-kachel__pfeil" aria-hidden="true">›</span>
               </button>
@@ -3546,14 +3546,18 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         {(!ausrichterAuswahlAktiv || aktiverAusrichter) && turniereGefiltert.map((t) => {
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
+          const ampel = frei === 0 ? "voll" : (frei <= 2 || frei / Math.max(1, t.maxPlaetze) <= 0.2) ? "knapp" : "frei";
           return (
-            <div className="kc-karte" key={t.id} style={{ borderLeftColor: frei === 0 ? "var(--kc-red)" : "var(--kc-green)" }}>
+            <div className={`kc-karte kc-karte--${ampel}`} key={t.id}>
               <div className="kc-karte__kopf">
                 {t.logoPfad && (
                   <img className="kc-turnier-logo" src={dateiOeffentlicheUrl(t.logoPfad)} alt={`Logo ${t.name}`} />
                 )}
                 <div className="kc-karte__kopf-text">
                   <h2 className="kc-karte__titel">{t.name}</h2>
+                  <span className={`kc-ampel-pille kc-ampel-pille--${ampel}`}>
+                    {ampel === "voll" ? "Ausgebucht · Warteliste" : ampel === "knapp" ? `Nur noch ${frei} ${frei === 1 ? "Platz" : "Plätze"}` : "Plätze frei"}
+                  </span>
                 </div>
                 <div className="kc-karte__zahl">
                   <span className="kc-zahl-gross">{frei}</span>
@@ -9907,4 +9911,22 @@ const CSS = `
   .kc-karte > .kc-btn--primary, .kc-karte .kc-admin-aktionen > .kc-btn--primary:only-child { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { .kc-karte, .kc-btn, .kc-ausrichter-kachel { transition: none; } }
+/* Ampel: frei = grün, knapp = gelb, ausgebucht = rot */
+.kc-karte--frei { border-left-color: #2E9E57; }
+.kc-karte--knapp { border-left-color: #E0A100; }
+.kc-karte--voll { border-left-color: #D9534A; }
+.kc-karte--frei .kc-karte__zahl { background: #E4F5EB; }
+.kc-karte--frei .kc-zahl-gross { color: #1E7A41; }
+.kc-karte--knapp .kc-karte__zahl { background: #FFF3D6; }
+.kc-karte--knapp .kc-zahl-gross { color: #9A6B00; }
+.kc-karte--voll .kc-karte__zahl { background: #FCE6E3; }
+.kc-karte--voll .kc-zahl-gross { color: #B3382F; }
+.kc-ampel-pille { display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; margin-top: 6px; }
+.kc-ausrichter-kachel__text span.kc-ampel-pille { align-self: flex-start; font-size: 12px; margin-top: 2px; }
+.kc-ampel-pille--frei { background: #E4F5EB; color: #1E7A41 !important; }
+.kc-ampel-pille--knapp { background: #FFF3D6; color: #9A6B00 !important; }
+.kc-ampel-pille--voll { background: #FCE6E3; color: #B3382F !important; }
+.kc-karte--voll .kc-btn--primary { background: linear-gradient(135deg, #E08A1E, #C46A0A); box-shadow: 0 6px 16px rgba(196,106,10,0.3); }
+.kc-karte--frei .kc-btn--primary { background: linear-gradient(135deg, #2E9E57, #1E7A41); box-shadow: 0 6px 16px rgba(30,122,65,0.3); }
+.kc-karte--knapp .kc-btn--primary { background: linear-gradient(135deg, #E0A100, #C48A00); box-shadow: 0 6px 16px rgba(196,138,0,0.3); }
 `;

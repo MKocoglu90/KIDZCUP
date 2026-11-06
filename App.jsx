@@ -7886,8 +7886,23 @@ function TurnierUebersicht({ turniere, anmeldungen, jetzt, onAnspringen }) {
       <span className="kc-ueberblick__pfeil" aria-hidden="true">›</span>
     </button>
   );
+  const summe = (feld) => kommend.reduce((sum, z) => sum + z[feld], 0);
+  const kennzahlen = [
+    { schluessel: "neu", zahl: summe("neu"), label: "Neu", klasse: "blau" },
+    { schluessel: "offen", zahl: summe("offen"), label: "Zahlung offen", klasse: "gelb" },
+    { schluessel: "bestaetigt", zahl: summe("bestaetigt"), label: "Bestätigt", klasse: "gruen" },
+    { schluessel: "warteliste", zahl: summe("warteliste"), label: "Warteliste", klasse: "rot" },
+  ];
   return (
     <section className="kc-ueberblick">
+      <div className="kc-kennzahlen" role="group" aria-label="Kennzahlen aller kommenden Turniere">
+        {kennzahlen.map((k) => (
+          <div key={k.schluessel} className={`kc-kennzahl kc-kennzahl--${k.klasse}`}>
+            <span className="kc-kennzahl__zahl">{k.zahl}</span>
+            <span className="kc-kennzahl__label">{k.label}</span>
+          </div>
+        ))}
+      </div>
       <button type="button" className="kc-ueberblick__kopf" onClick={() => setOffen((v) => !v)} aria-expanded={offen}>
         <span>📋 Übersicht aller Turniere ({turniere.length}){neuGesamt > 0 ? ` · 🆕 ${neuGesamt} neue Anmeldung${neuGesamt !== 1 ? "en" : ""}` : ""}</span>
         <span aria-hidden="true">{offen ? "▾" : "▸"}</span>
@@ -9911,6 +9926,29 @@ const CSS = `
   .kc-karte > .kc-btn--primary, .kc-karte .kc-admin-aktionen > .kc-btn--primary:only-child { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { .kc-karte, .kc-btn, .kc-ausrichter-kachel { transition: none; } }
+/* Admin-Optik */
+.kc-ueberblick { border: 0; border-radius: var(--kc-radius); box-shadow: var(--kc-shadow); }
+.kc-ueberblick__kopf { background: #FFFFFF; padding: 14px 16px; font-size: 15px; border-top: 1px solid #EEF1F5; }
+.kc-ueberblick__liste { gap: 8px; padding: 12px; background: #F7F9FC; }
+.kc-ueberblick__zeile { border-radius: 14px; border-color: #E8EDF4; box-shadow: 0 1px 2px rgba(27,42,71,0.04); padding: 11px 14px; transition: box-shadow 0.15s, transform 0.15s; }
+.kc-ueberblick__zeile:hover, .kc-ueberblick__zeile:focus-visible { box-shadow: 0 6px 16px rgba(27,42,71,0.10); transform: translateY(-1px); }
+.kc-ueberblick__pfeil { background: #EAF2FA; color: #2E5C8A; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; padding-bottom: 2px; }
+.kc-status-chip { padding: 4px 11px; }
+.kc-kennzahlen { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 14px; background: #FFFFFF; }
+.kc-kennzahl { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 12px 6px; border-radius: 14px; text-align: center; }
+.kc-kennzahl__zahl { font-size: 26px; font-weight: 800; line-height: 1; letter-spacing: -0.5px; }
+.kc-kennzahl__label { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+.kc-kennzahl--blau { background: #E4ECF6; color: #1B3E6B; }
+.kc-kennzahl--gelb { background: #FFF3D6; color: #8A6200; }
+.kc-kennzahl--gruen { background: #E4F5EB; color: #1E7A41; }
+.kc-kennzahl--rot { background: #FCE6E3; color: #B3382F; }
+.kc-admin-kopf .kc-h1 { margin-bottom: 4px; }
+.kc-menue__liste { border-radius: 16px; }
+.kc-admin-aktionen--klein { gap: 8px; }
+.kc-admin-aktionen--klein .kc-btn--sekundaer.kc-btn--klein { background: #EEF3F9; }
+.kc-anmeldungs-zeile strong { font-size: 15px; color: var(--kc-pitch); }
+.kc-anmeldungs-zeile .kc-notiz { margin-top: 2px; }
+@media (max-width: 480px) { .kc-kennzahlen { grid-template-columns: repeat(2, 1fr); } .kc-kennzahl__zahl { font-size: 24px; } }
 /* Ampel: frei = grün, knapp = gelb, ausgebucht = rot */
 .kc-karte--frei { border-left-color: #2E9E57; }
 .kc-karte--knapp { border-left-color: #E0A100; }

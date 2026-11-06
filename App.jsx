@@ -9833,4 +9833,78 @@ const CSS = `
   .kc-h1 { font-size: 23px; }
   .kc-karte { padding: 15px; }
 }
+
+/* ===== Design-Update 2026-11: moderner Look (nur Optik, keine Logik) ===== */
+.kc-root { --kc-radius: 18px; --kc-shadow: 0 2px 6px rgba(27,42,71,0.06), 0 10px 28px rgba(27,42,71,0.07); --kc-shadow-hover: 0 4px 10px rgba(27,42,71,0.08), 0 16px 36px rgba(27,42,71,0.13); background: linear-gradient(180deg, #E9F1F9 0px, #F4F6F9 320px, #F4F6F9 100%); }
+.kc-header { padding: 12px 20px; border-bottom: 0; box-shadow: 0 1px 0 #E3E9F0, 0 6px 20px rgba(27,42,71,0.06); backdrop-filter: saturate(1.4) blur(8px); background: rgba(255,255,255,0.92); }
+.kc-logo-img { height: 46px; border-radius: 8px; mix-blend-mode: multiply; }
+.kc-nav { gap: 6px; background: #EEF2F7; padding: 4px; border-radius: 999px; }
+.kc-chip { border: 0; padding: 9px 18px; color: #4A5A73; }
+.kc-chip:hover { background: rgba(255,255,255,0.7); }
+.kc-chip--active { background: linear-gradient(135deg, #1B2A47, #2E5C8A); color: #FFFFFF; box-shadow: 0 4px 12px rgba(27,42,71,0.25); }
+.kc-main { padding: 28px 18px 24px; }
+.kc-h1 { font-size: 32px; letter-spacing: -0.6px; line-height: 1.15; }
+.kc-h2 { letter-spacing: -0.3px; }
+.kc-sub { font-size: 15.5px; }
+
+.kc-karte { border-radius: var(--kc-radius); border-left-width: 6px; padding: 20px 20px 18px; box-shadow: var(--kc-shadow); transition: transform 0.18s ease, box-shadow 0.18s ease; }
+.kc-karte:hover { box-shadow: var(--kc-shadow-hover); }
+.kc-karte__titel { font-size: 20px; letter-spacing: -0.3px; line-height: 1.25; }
+.kc-karte__zahl { background: #F1F6FB; border-radius: 14px; padding: 8px 12px; min-width: 64px; text-align: center; }
+.kc-zahl-gross { font-size: 28px; }
+.kc-turnier-logo { width: 52px; height: 52px; border-radius: 14px; border-color: #E3E9F0; }
+.kc-details { gap: 10px 28px; margin: 16px 0; padding: 14px 16px; background: #F7F9FC; border-radius: 14px; }
+.kc-details dt { text-transform: uppercase; letter-spacing: 0.5px; font-size: 10.5px; font-weight: 700; color: #7A8699; }
+.kc-details dd { font-size: 14.5px; margin-top: 2px; }
+.kc-turnier-beschreibung { background: #F7F9FC; border-radius: 14px; }
+.kc-fortschritt { height: 10px; background: #E3EAF2; }
+.kc-fortschritt__fuellung { background: linear-gradient(90deg, #2E9E57, #6FC48A); }
+.kc-fortschritt__fuellung--voll { background: linear-gradient(90deg, #D9534A, #F08C84); }
+
+.kc-btn { border-radius: 12px; padding: 13px 22px; font-size: 15px; font-weight: 700; letter-spacing: 0.1px; transition: transform 0.12s ease, box-shadow 0.15s ease, background 0.15s ease, filter 0.15s ease; }
+.kc-btn:active { transform: scale(0.98); }
+.kc-btn--primary { background: linear-gradient(135deg, #2E5C8A, #1B2A47); box-shadow: 0 6px 16px rgba(27,42,71,0.25); }
+.kc-btn--primary:hover:not(:disabled) { filter: brightness(1.08); box-shadow: 0 8px 20px rgba(27,42,71,0.32); }
+.kc-btn--primary:disabled { background: #C6D0DC; box-shadow: none; }
+.kc-btn--sekundaer { background: #EAF0F7; color: #1B2A47; }
+.kc-btn--sekundaer:hover { background: #DDE7F2; }
+.kc-btn--gefahr:hover { background: #F8D9D5; }
+.kc-btn--klein { padding: 8px 14px; font-size: 13px; border-radius: 10px; box-shadow: none; }
+.kc-btn--primary.kc-btn--klein { box-shadow: 0 3px 8px rgba(27,42,71,0.2); }
+
+.kc-input { border: 1.5px solid #D5DEE9; border-radius: 12px; padding: 12px 14px; background: #FFFFFF; font-size: 15px; transition: border-color 0.15s, box-shadow 0.15s; }
+.kc-input:focus { outline: none; border-color: #2E5C8A; box-shadow: 0 0 0 4px rgba(46,92,138,0.15); }
+.kc-feld { gap: 7px; }
+.kc-formular { gap: 16px; }
+.kc-team-block { background: #F7F9FC; border-left: 0; border: 1px solid #E3E9F0; border-radius: 16px; padding: 16px 16px 4px; }
+.kc-formular-karte { border-radius: var(--kc-radius); box-shadow: var(--kc-shadow); padding: 22px; }
+.kc-hinweis { border-radius: 14px; padding: 14px 16px; background: #EAF2FA; }
+.kc-hinweis--erfolg { background: #E4F5EB; }
+.kc-hinweis--warteliste { background: #FFF3D6; border: 1px solid #F3DFA2; }
+.kc-code-box { background: #EAF2FA; border-radius: 14px; border: 1px dashed #A9C4DF; padding: 14px 16px; }
+.kc-checkbox-chip { background: #F1F6FB; border-color: #D5E2F0; }
+
+.kc-ausrichter-raster { gap: 16px; }
+.kc-ausrichter-kachel { border-left: 0; border-radius: var(--kc-radius); padding: 18px; box-shadow: var(--kc-shadow); gap: 16px; }
+.kc-ausrichter-kachel:hover, .kc-ausrichter-kachel:focus-visible { box-shadow: var(--kc-shadow-hover); transform: translateY(-3px); }
+.kc-ausrichter-kachel__logo { width: 58px; height: 58px; border-radius: 16px; }
+.kc-ausrichter-kachel__text strong { font-size: 17.5px; letter-spacing: -0.2px; }
+.kc-ausrichter-kachel__pfeil { background: #EAF2FA; color: #2E5C8A; width: 34px; height: 34px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 22px; padding-bottom: 3px; flex-shrink: 0; }
+
+.kc-status-badge { padding: 7px 15px; box-shadow: 0 2px 6px rgba(27,42,71,0.15); }
+.kc-status-badge--klein { padding: 4px 11px; box-shadow: none; }
+.kc-zurueck { background: #EAF2FA; padding: 7px 14px; border-radius: 999px; color: #2E5C8A; font-size: 13.5px; }
+.kc-zurueck:hover { background: #DCE9F6; }
+.kc-anmeldungs-zeile { background: #F7F9FC; border: 1px solid #E8EDF4; border-radius: 14px; padding: 12px 14px; }
+.kc-footer { padding-top: 28px; }
+.kc-filter-leiste { margin-bottom: 16px; }
+
+@media (max-width: 480px) {
+  .kc-main { padding: 20px 14px 20px; }
+  .kc-h1 { font-size: 26px; }
+  .kc-karte { padding: 16px; }
+  .kc-btn { padding: 13px 18px; }
+  .kc-karte > .kc-btn--primary, .kc-karte .kc-admin-aktionen > .kc-btn--primary:only-child { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .kc-karte, .kc-btn, .kc-ausrichter-kachel { transition: none; } }
 `;

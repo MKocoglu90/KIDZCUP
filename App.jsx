@@ -6568,6 +6568,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     benachrichtigen("erinnerung", anmeldung, turnier);
   };
 
+  // Schickt die Eingangsbestätigung (Mail direkt nach der Anmeldung) erneut an den Trainer,
+  // z. B. wenn der Mail-Server zum Zeitpunkt der Anmeldung nicht erreichbar war.
+  const eingangsmailErneutSenden = async (anmeldung) => {
+    const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+    if (!anmeldung.email) { alert("Für diese Anmeldung ist keine E-Mail-Adresse hinterlegt."); return; }
+    if (!window.confirm(`Eingangsbestätigung erneut an ${anmeldung.email} (${anmeldung.verein}) senden?`)) return;
+    const ok = await eingangsbestaetigungSenden([anmeldung], turnier);
+    alert(ok ? `✓ Mail an ${anmeldung.email} wurde verschickt.` : "Die Mail konnte nicht verschickt werden. Bitte später noch einmal versuchen.");
+  };
+
   // Verlängert die abgelaufene Zahlungsfrist um weitere 3 Tage, ohne den Platz freizugeben.
   // Informiert den Verein automatisch über die neue Frist (nutzt dieselbe Vorlage wie "Erinnerung").
   const fristVerlaengern = async (anmeldungId) => {
@@ -7555,6 +7565,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          {st === "eingegangen" && (
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => eingangsmailErneutSenden(a)} title="Eingangsbestätigung erneut an den Trainer schicken">
+                              📧 Eingangsmail erneut senden
+                            </button>
+                          )}
                           <a
                             className="kc-btn kc-btn--sekundaer kc-btn--klein"
                             href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
@@ -7680,6 +7695,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          {st === "eingegangen" && (
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => eingangsmailErneutSenden(a)} title="Eingangsbestätigung erneut an den Trainer schicken">
+                              📧 Eingangsmail erneut senden
+                            </button>
+                          )}
                           <a
                             className="kc-btn kc-btn--sekundaer kc-btn--klein"
                             href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
@@ -7720,6 +7740,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                               onClick={() => ausWartelisteAufnehmen(a.id)}
                             >
                               {frei === 0 ? "Kein Platz frei" : "In Turnier aufnehmen"}
+                            </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => eingangsmailErneutSenden(a)} title="Eingangsbestätigung erneut an den Trainer schicken">
+                              📧 Eingangsmail erneut senden
                             </button>
                             <a
                               className="kc-btn kc-btn--sekundaer kc-btn--klein"

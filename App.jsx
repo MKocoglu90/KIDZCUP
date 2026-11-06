@@ -9859,7 +9859,7 @@ const CSS = `
 .kc-logo-img { height: 46px; border-radius: 8px; mix-blend-mode: multiply; }
 .kc-nav { gap: 6px; background: #EEF2F7; padding: 4px; border-radius: 999px; }
 .kc-chip { border: 0; padding: 9px 18px; color: #4A5A73; }
-.kc-chip:hover { background: rgba(255,255,255,0.7); }
+.kc-chip:hover:not(.kc-chip--active) { background: rgba(255,255,255,0.7); }
 .kc-chip--active { background: linear-gradient(135deg, #1B2A47, #2E5C8A); color: #FFFFFF; box-shadow: 0 4px 12px rgba(27,42,71,0.25); }
 .kc-main { padding: 28px 18px 24px; }
 .kc-h1 { font-size: 32px; letter-spacing: -0.6px; line-height: 1.15; }
